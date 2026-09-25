@@ -130,6 +130,16 @@ if [ "${1:-}" = "--print-env" ]; then
   exit 0
 fi
 
+# The watcher sees SUTANDO_INSTANCE_ID in every worker session and therefore
+# requires the pool delivery writer. Fail before creating a session that could
+# receive tasks but cannot safely acknowledge them.
+if [ -z "${SUTANDO_POOL_DELIVERY_SCRIPT:-}" ] || \
+   [ ! -f "$SUTANDO_POOL_DELIVERY_SCRIPT" ] || \
+   [ ! -r "$SUTANDO_POOL_DELIVERY_SCRIPT" ]; then
+  echo "launch-worker-session.sh needs SUTANDO_POOL_DELIVERY_SCRIPT to name a readable file" >&2
+  exit 2
+fi
+
 # Same onboarding/hooks treatment a core launch gets: a worker is also
 # headless (no TTY, --dangerously-skip-permissions) and can hang on the exact
 # same unattended prompts (folder-trust, bypass-permissions, AskUserQuestion)
