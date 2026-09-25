@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The remedy resumes a dead worker on its OWN session, and does nothing else.
+"""The remedy recovers a dead worker under its OWN identity and inbox.
 
 What is pinned here is what a timer with nobody watching must get right: it uses
 the socket the worker last ran on rather than an environment it does not have,
@@ -74,6 +74,7 @@ class Base(unittest.TestCase):
                          runner=self.t, require_sentinel=False)
         self.wid, self.session, self.inbox = (first["worker_id"], first["runtime_session_id"],
                                               first["delivery_dir"])
+        sup.pr.register_worker(self.ws, self.wid, "alpha", runtime="claude")
         self.t.live.clear()                       # the worker died
         self.launched_before = len(self.t.launches())
 
@@ -110,6 +111,78 @@ class ItResumesTheSameWorker(Base):
         self.assertEqual(sockets, {SOCK},
                          "a timer has no SUTANDO_TMUX_SOCKET; falling back to it probes and "
                          "launches on a tmux server the worker never ran on")
+
+
+class CodexRecovery(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.ws = Path(self.tmp.name)
+        self.cwd = self.ws / "project"
+        self.cwd.mkdir()
+        self.t = FakeTmux(runtime="codex")
+        first = sw.spawn(self.ws, REPO, runtime="codex", cwd=str(self.cwd),
+                         socket=SOCK, label="Codex reviewer", runner=self.t,
+                         require_sentinel=False)
+        self.wid = first["worker_id"]
+        self.inbox = first["delivery_dir"]
+        sup.pr.register_worker(self.ws, self.wid, "Codex reviewer", runtime="codex")
+        self.t.live.clear()
+
+    def test_dead_codex_worker_gets_fresh_run_with_same_identity_and_inbox(self):
+        self.assertEqual(wi.sessions(self.ws, self.wid), [])
+        self.assertIsNone(wi.current(self.ws, self.wid)["session_id"])
+        before = len(self.t.launches())
+        out = rem.recover(self.ws, REPO, self.wid, runner=self.t)
+        self.assertEqual(out["outcome"], rem.RECOVERED)
+        self.assertIsNone(out["session_id"])
+        self.assertEqual(len(self.t.launches()), before + 1)
+        self.assertEqual([p.name for p in (self.ws / "state/workers").iterdir()
+                          if p.is_dir()], [self.wid])
+        self.assertTrue(Path(self.inbox).is_dir())
+        self.assertEqual(wi.sessions(self.ws, self.wid), [])
+        runs = wi.incarnations(self.ws, self.wid)
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(runs[0]["end_reason"], "crashed")
+        self.assertIsNone(runs[1]["ended_at"])
+        self.assertIsNone(runs[1]["session_id"])
+        self.assertEqual(runs[1]["cwd"], str(self.cwd))
+        _, env = self.t.launches()[-1]
+        self.assertEqual(env["SUTANDO_WORKER_RUNTIME"], "codex")
+        self.assertEqual(env["SUTANDO_TMUX_SOCKET"], SOCK)
+        self.assertEqual(env["SUTANDO_TASKS_DIR"], self.inbox)
+        self.assertEqual(env["SUTANDO_CODEX_WORKING_DIR"], str(self.cwd))
+        self.assertNotIn("SUTANDO_CLAUDE_RESUME", env)
+
+    def test_a_live_codex_worker_is_not_relaunched(self):
+        self.t.live.add(wi.tmux_session_name(self.wid))
+        before_runs = wi.incarnations(self.ws, self.wid)
+        before_launches = len(self.t.launches())
+        out = rem.recover(self.ws, REPO, self.wid, runner=self.t)
+        self.assertEqual(out["outcome"], rem.ALREADY_RUNNING)
+        self.assertEqual(wi.incarnations(self.ws, self.wid), before_runs)
+        self.assertEqual(len(self.t.launches()), before_launches)
+
+    def test_a_failed_codex_relaunch_leaves_no_open_incarnation(self):
+        self.t.launcher_fails = True
+        out = rem.recover(self.ws, REPO, self.wid, runner=self.t)
+        self.assertEqual(out["outcome"], rem.FAILED)
+        self.assertEqual([r for r in wi.incarnations(self.ws, self.wid)
+                          if r["ended_at"] is None], [])
+
+    def test_watcher_rearm_carries_codex_runtime_and_clears_core_handler(self):
+        seen = []
+
+        def run(argv, **kw):
+            seen.append((argv, kw["env"]))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        out = rem.ensure_supervisor(self.ws, REPO, self.wid, runner=run)
+        self.assertEqual(out["outcome"], rem.SUPERVISED)
+        env = seen[0][1]
+        self.assertEqual(env["SUTANDO_WORKER_RUNTIME"], "codex")
+        self.assertEqual(env["SUTANDO_TASK_EVENT_HANDLER"], "")
+        self.assertEqual(env["SUTANDO_TMUX_SOCKET"], SOCK)
 
 
 class ItLeavesHonestRunRecords(Base):

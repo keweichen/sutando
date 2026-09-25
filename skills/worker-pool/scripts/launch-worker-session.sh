@@ -35,6 +35,9 @@ esac
 REPO="$(cd "$_self_dir/../../.." && pwd)"
 unset _self_dir
 cd "$REPO"
+if [ "${SUTANDO_WORKER_RUNTIME:-claude}" = "codex" ]; then
+  exec bash "$REPO/skills/worker-pool/scripts/launch-codex-worker-session.sh" "$@"
+fi
 # shellcheck source=../../../src/agent/claude/cli/session-launch.sh
 . "$REPO/src/agent/claude/cli/session-launch.sh"
 

@@ -54,7 +54,7 @@ LAUNCHER = "skills/worker-pool/scripts/launch-worker-session.sh"
 
 # Worker mode is a property of an ADAPTER, not of the pool: a runtime is
 # listed here once its launcher isolates a worker's session, cwd and state.
-WORKER_MODE_RUNTIMES = ("claude",)
+WORKER_MODE_RUNTIMES = ("claude", "codex")
 
 
 class SpawnRefused(Exception):
@@ -177,12 +177,11 @@ def plan(workspace, repo, *, runtime: str = "claude", cwd: str = "",
         "delivery_dir": delivery_dir,
         "tmux": {"socket": socket, "session_name": wi.tmux_session_name(worker_id)},
         # Absolute, from `repo`: relative, `cwd` would pick which code runs.
-        # No --runtime: only claude ever had a worker mode (WORKER_MODE_RUNTIMES),
-        # so this script needs no runtime selection at all.
         "launcher_argv": ["bash", str(Path(repo) / LAUNCHER)],
         "env": {"SUTANDO_TMUX_SOCKET": socket,
                 "SUTANDO_TMUX_SESSION": wi.tmux_session_name(worker_id),
                 "SUTANDO_INSTANCE_ID": worker_id,
+                "SUTANDO_WORKER_RUNTIME": runtime,
                 "SUTANDO_TASKS_DIR": delivery_dir,
                 # The inbox holds sentinels, not task bodies. The reader is TOLD
                 # that here; inferring it from the path is the reader deciding.
@@ -194,6 +193,7 @@ def plan(workspace, repo, *, runtime: str = "claude", cwd: str = "",
                 # bridges drain them, which is the workspace's own results/.
                 "SUTANDO_RESULTS_DIR": str(pd.results_dir(workspace)),
                 "SUTANDO_CLAUDE_WORKING_DIR": str(cwd or repo),
+                "SUTANDO_CODEX_WORKING_DIR": str(cwd or repo),
                 # The worker's own gate, named by the skill that owns it: the
                 # core's `/startup --worker` runs what it is handed, not a path.
                 "SUTANDO_WORKER_BOOTSTRAP": str(_SCRIPTS / "worker_bootstrap.py"),
@@ -225,7 +225,10 @@ def ensure_remedy_timer(workspace, repo, *, runner=None,
         st = prt.status(launch_agents=launch_agents, runner=runner)
         # `pool_remedy` calls spawn() from inside this job, so re-installing
         # a healthy timer would bootout the job currently running.
-        if st.get("installed") and st.get("loaded"):
+        same_target = (st.get("workspace") and st.get("repo")
+                       and Path(st["workspace"]).resolve() == Path(workspace).resolve()
+                       and Path(st["repo"]).resolve() == Path(repo).resolve())
+        if st.get("installed") and st.get("loaded") and same_target:
             return {"ensured": False, "why": "already installed",
                     "plist": st.get("plist")}
         out = prt.install(workspace, repo, launch_agents=launch_agents,
@@ -238,7 +241,8 @@ def ensure_remedy_timer(workspace, repo, *, runner=None,
 
 def spawn(workspace, repo, *, runtime=None, cwd: str = "",
           socket=None, label: str = "", runner=_run,
-          require_sentinel: bool = True, resume: str = "") -> dict:
+          require_sentinel: bool = True, resume: str = "",
+          existing_worker_id: str = "") -> dict:
     """Create the four parts, in an order where a failure leaves less behind.
 
     Identity first (a record with no process is inert), then the delivery folder,
@@ -248,6 +252,18 @@ def spawn(workspace, repo, *, runtime=None, cwd: str = "",
     """
     socket = socket or default_socket()
     runtime = resolve_runtime(repo, runtime, runner)
+    if runtime == "codex" and resume:
+        raise SpawnRefused("Codex cannot resume without a recorded CLI session id")
+    if existing_worker_id and runtime != "codex":
+        raise SpawnRefused("fresh recovery by worker id is only supported for Codex")
+    if existing_worker_id and resume:
+        raise SpawnRefused("worker-id recovery cannot also resume a session")
+    if existing_worker_id and not wi.worker_dir(workspace, existing_worker_id).is_dir():
+        raise SpawnRefused(f"worker {existing_worker_id!r} has no identity record")
+    if existing_worker_id:
+        row = ((pr.load_roster(workspace) or {}).get("workers") or {}).get(existing_worker_id)
+        if not isinstance(row, dict) or row.get("runtime") != "codex":
+            raise SpawnRefused(f"worker {existing_worker_id!r} is not a rostered Codex worker")
     if require_sentinel and not per_instance_sentinel_supported(repo, runner):
         raise SpawnRefused(
             "this checkout writes ONE watcher sentinel for every watcher, so a "
@@ -260,14 +276,14 @@ def spawn(workspace, repo, *, runtime=None, cwd: str = "",
         raise SpawnRefused(
             f"no worker in this workspace has session {resume!r} in its lineage; "
             "refusing rather than resuming a conversation into a stranger's record")
-    session_id = resume or str(uuid.uuid4())   # the CLI wants a dashed UUID
+    session_id = resume or (None if runtime == "codex" else str(uuid.uuid4()))
 
     # Preconditions are answered BEFORE the first durable write: a refusal after
     # minting leaves a worker nothing in the roster knows about.
-    worker_id = resumed_id or wi.new_worker_id()
+    worker_id = existing_worker_id or resumed_id or wi.new_worker_id()
     # The ROSTER owns labels (worker_identity records lineage, not naming), so a
     # resume reads the owner's chosen name from there rather than re-deriving it.
-    if resumed_id and not label:
+    if (resumed_id or existing_worker_id) and not label:
         # load_roster answers None when no roster exists yet; a worker with no
         # roster row simply has no chosen name, which plan() handles.
         label = ((pr.load_roster(workspace) or {}).get("workers", {})
@@ -282,7 +298,12 @@ def spawn(workspace, repo, *, runtime=None, cwd: str = "",
         raise SpawnRefused(f"tmux could not say whether session {name!r} exists "
                            f"({detail}); refusing rather than minting a worker over one")
     run = None
-    if resumed_id:
+    if existing_worker_id:
+        run = wi.start_incarnation(workspace, worker_id, None,
+                                   tmux_socket=socket, tmux_session=name,
+                                   runtime="codex", cwd=str(cwd or repo))
+        rec = {"worker_id": worker_id}
+    elif resumed_id:
         run = wi.start_incarnation(workspace, worker_id, session_id, tmux_socket=socket,
                                    tmux_session=name)
         rec = {"worker_id": worker_id}
@@ -297,8 +318,9 @@ def spawn(workspace, repo, *, runtime=None, cwd: str = "",
     env = {k: v for k, v in os.environ.items()
            if k not in ("SUTANDO_CLAUDE_RESUME", "SUTANDO_CLAUDE_SESSION_ID")}
     env.update(p["env"])
-    env.update({"SUTANDO_CLAUDE_RESUME": session_id} if resumed_id
-               else {"SUTANDO_CLAUDE_SESSION_ID": session_id})
+    if runtime == "claude":
+        env.update({"SUTANDO_CLAUDE_RESUME": session_id} if resumed_id
+                   else {"SUTANDO_CLAUDE_SESSION_ID": session_id})
     r = runner(p["launcher_argv"], env=env)
     if r.returncode != 0:
         why = (r.stderr or "").strip()
@@ -322,7 +344,7 @@ def spawn(workspace, repo, *, runtime=None, cwd: str = "",
         # not ours to remove, only the run we failed to start.
         if run is not None:
             wi.end_incarnation(workspace, worker_id, run["incarnation_id"], "crashed")
-        if not resumed_id:
+        if not resumed_id and not existing_worker_id:
             shutil.rmtree(wi.worker_dir(workspace, rec["worker_id"]), ignore_errors=True)
             shutil.rmtree(p["delivery_dir"], ignore_errors=True)
         raise SpawnRefused(f"the runtime launcher failed: {why}")

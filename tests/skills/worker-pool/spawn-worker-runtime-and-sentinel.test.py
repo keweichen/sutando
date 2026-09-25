@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """Two guards that used to answer a question they never asked.
 
-RUNTIME: the record named one runtime and the launcher chose another, because
-the dispatcher rereads the CORE's configuration. A worker no longer goes
-through that dispatcher at all -- its own launcher only ever runs claude
-(WORKER_MODE_RUNTIMES), so there is no argv selector to drift from the record.
-A runtime whose adapter has no worker mode is still refused BEFORE any
-identity state exists -- a record for a worker that cannot run is worse than no
-worker.
+RUNTIME: the worker's own launcher selects Claude or Codex from the runtime
+the spawner recorded in its environment. An unknown adapter is refused BEFORE
+any identity state exists.
 
 SENTINEL: the guard asked whether `util_paths.py` CONTAINS `def
 watcher_sentinel_path`. A checkout that resolves one shared sentinel passes
@@ -108,13 +104,12 @@ class TestRuntimeSelector(unittest.TestCase):
         self.ws = Path(self._t.name)
 
     def test_the_plan_hands_the_launcher_no_runtime_selector(self):
-        """No --runtime in the argv at all: the worker's own launcher only
-        ever runs claude (WORKER_MODE_RUNTIMES), so there is nothing to
-        select and nothing that could drift from the record."""
+        """The runtime is an environment value, not a dispatcher argv flag."""
         p = sw.plan(self.ws, REPO, runtime="claude")
         argv = p["launcher_argv"]
         self.assertNotIn("--runtime", argv)
         self.assertTrue(argv[1].endswith("launch-worker-session.sh"), argv)
+        self.assertEqual(p["env"]["SUTANDO_WORKER_RUNTIME"], "claude")
 
     def test_the_spawn_launches_the_workers_own_script(self):
         r = Runner()
@@ -126,7 +121,7 @@ class TestRuntimeSelector(unittest.TestCase):
 
     def test_a_runtime_without_worker_mode_is_refused(self):
         with self.assertRaises(sw.SpawnRefused) as e:
-            sw.spawn(self.ws, REPO, runtime="codex", runner=Runner(),
+            sw.spawn(self.ws, REPO, runtime="nonesuch", runner=Runner(),
                      require_sentinel=False)
         self.assertIn("worker mode", str(e.exception))
 
@@ -135,18 +130,20 @@ class TestRuntimeSelector(unittest.TestCase):
         success this gate exists to prevent."""
         r = Runner()
         with self.assertRaises(sw.SpawnRefused):
-            sw.spawn(self.ws, REPO, runtime="codex", runner=r, require_sentinel=False)
+            sw.spawn(self.ws, REPO, runtime="nonesuch", runner=r, require_sentinel=False)
         self.assertFalse((self.ws / "state" / "workers").exists())
         self.assertFalse((self.ws / "deliveries").exists())
         self.assertEqual(r.launches, [])
 
-    def test_a_codex_configured_core_refuses_rather_than_running_claude(self):
-        """The probe keweichen ran: requested=codex, dispatcher_selected=claude.
-        With no explicit runtime the core's config decides, and it must not
-        silently resolve to the one adapter that does have worker mode."""
-        with self.assertRaises(sw.SpawnRefused):
-            sw.spawn(self.ws, REPO, runner=Runner(runtime="codex"),
-                     require_sentinel=False)
+    def test_a_codex_configured_core_launches_codex_without_claiming_a_session_id(self):
+        r = Runner(runtime="codex")
+        made = sw.spawn(self.ws, REPO, runner=r, require_sentinel=False)
+        self.assertEqual(made["runtime"], "codex")
+        self.assertIsNone(made["runtime_session_id"])
+        self.assertEqual(made["env"]["SUTANDO_WORKER_RUNTIME"], "codex")
+        self.assertEqual(sw.wi.sessions(self.ws, made["worker_id"]), [])
+        self.assertIsNone(sw.wi.current(self.ws, made["worker_id"])["session_id"])
+        self.assertEqual(len(r.launches), 1)
 
 
 class TestDispatcherHonoursTheSelector(unittest.TestCase):

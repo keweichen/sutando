@@ -131,6 +131,11 @@ def status(*, launch_agents: Path | None = None, runner=None) -> dict:
                 job = plistlib.load(fh)
             out["interval_s"] = job.get("StartInterval")
             out["log"] = job.get("StandardOutPath")
+            args = job.get("ProgramArguments") or []
+            for key in ("workspace", "repo"):
+                flag = "--" + key
+                if flag in args and args.index(flag) + 1 < len(args):
+                    out[key] = args[args.index(flag) + 1]
         except (OSError, ValueError) as e:
             out["error"] = f"plist unreadable: {e}"
     return out

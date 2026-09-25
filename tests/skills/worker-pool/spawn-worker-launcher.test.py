@@ -134,6 +134,7 @@ class TestPlan(Base):
         p = sw.plan(self.ws, REPO, cwd="/dev/proj")
         self.assertEqual(p["cwd"], "/dev/proj")
         self.assertNotIn("/dev/proj", p["delivery_dir"])
+        self.assertEqual(p["env"]["SUTANDO_CODEX_WORKING_DIR"], "/dev/proj")
 
 
 class TestRefusals(Base):
@@ -364,12 +365,27 @@ class TestRuntimeStartFailure(Base):
         argv = [c for c in t.calls if c[0] == "bash" and c[1].endswith("launch-worker-session.sh")][0]
         self.assertNotIn("--runtime", argv)
 
-    def test_a_configured_runtime_without_worker_mode_is_refused(self):
-        """Worker mode is a property of the ADAPTER. Spawning under one that
-        has none reports a worker the launcher cannot actually isolate."""
+    def test_a_codex_worker_gets_its_runtime_and_folder_without_claude_session_env(self):
+        t = FakeTmux(runtime="codex")
+        got = sw.spawn(self.ws, REPO, cwd="/dev/project", runner=t,
+                       require_sentinel=False)
+        env = t.launches()[0]
+        self.assertEqual(got["runtime"], "codex")
+        self.assertIsNone(got["runtime_session_id"])
+        self.assertEqual(env["SUTANDO_WORKER_RUNTIME"], "codex")
+        self.assertEqual(env["SUTANDO_CODEX_WORKING_DIR"], "/dev/project")
+        self.assertEqual(env["SUTANDO_TASKS_DIR"], got["delivery_dir"])
+        self.assertNotIn("SUTANDO_CLAUDE_SESSION_ID", env)
+        self.assertNotIn("SUTANDO_CLAUDE_RESUME", env)
+        self.assertEqual(wi.sessions(self.ws, got["worker_id"]), [])
+
+    def test_codex_resume_refuses_before_any_identity_write(self):
+        t = FakeTmux(runtime="codex")
         with self.assertRaises(sw.SpawnRefused):
-            sw.spawn(self.ws, REPO, runner=FakeTmux(runtime="codex"),
-                     require_sentinel=False)
+            sw.spawn(self.ws, REPO, runtime="codex", resume="unrecorded-id",
+                     runner=t, require_sentinel=False)
+        self.assertFalse((self.ws / "state" / "workers").exists())
+        self.assertFalse((self.ws / "deliveries").exists())
 
 
 class TestSentinelProbe(Base):

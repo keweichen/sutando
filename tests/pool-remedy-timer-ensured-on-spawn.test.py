@@ -123,6 +123,29 @@ if not lc.ran("bootout"):
 else:
     fail(f"booted out the job it may be running inside: {lc.argv}")
 
+# --- a loaded job for an old checkout/workspace does not supervise this pool ---
+tmp = Path(tempfile.mkdtemp())
+la = tmp / "LaunchAgents"
+la.mkdir()
+sw.prt.install(tmp / "old-workspace", str(REPO), launch_agents=la,
+               runner=Launchctl(), sleep=lambda *_: None)
+lc = Launchctl(loaded=True)
+real = sys.platform
+try:
+    sys.platform = "darwin"
+    out = sw.ensure_remedy_timer(tmp / "new-workspace", str(REPO),
+                                 runner=lc, launch_agents=la)
+finally:
+    sys.platform = real
+if out.get("ensured") is True and lc.ran("bootout") and lc.ran("bootstrap"):
+    ok("a loaded timer for another workspace is rebound to this pool")
+else:
+    fail(f"stale loaded timer was left supervising another workspace: {out}, {lc.argv}")
+if sw.prt.status(launch_agents=la, runner=lc).get("workspace") == str((tmp / "new-workspace").resolve()):
+    ok("the rebound timer records this worker's workspace")
+else:
+    fail("rebound timer still names the old workspace")
+
 # --- a failing install must not raise ----------------------------------------
 out, _, _ = case("broken", loaded=False, bootstrap_rc=1)
 if out.get("ensured") is False and "RuntimeError" in str(out.get("why")):

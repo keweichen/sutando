@@ -377,8 +377,8 @@ exit 0
         self.assertIn("install --workspace", invocation)
         self.assertIn("--host-label test-host", invocation)
     def test_a_worker_instance_launch_is_refused_before_any_core_write(self):
-        """There is no Codex worker mode. Through the dispatcher's --runtime and
-        directly, an instance launch is refused, and none of the core's durable
+        """The core entry point refuses a pool instance. Through the dispatcher's
+        --runtime and directly, an instance launch touches none of the core's durable
         records or managed processes is touched."""
         worker = {"SUTANDO_INSTANCE_ID": "a" * 32,
                   "SUTANDO_TMUX_SESSION": "sutando-worker-" + "a" * 32,
@@ -389,7 +389,7 @@ exit 0
                 result = self.run_launcher(*args, env_extra=worker, launcher=entry)
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn("SUTANDO_INSTANCE_ID", result.stderr)
-                self.assertIn("Codex workers are unsupported", result.stderr)
+                self.assertIn("launch-codex-worker-session.sh", result.stderr)
         state = self.root / "workspace" / "state"
         self.assertFalse((state / "core-runtime.json").exists(),
                          "a worker wrote the core's runtime record")

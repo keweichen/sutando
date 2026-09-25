@@ -249,21 +249,15 @@ class TestDryRunPredictsTheSameRuntimeAsTheRealRun(Base):
         self.assertEqual(self.run_cli(), 0)
         self.assertEqual(planned, "claude")
 
-    def test_omitted_runtime_with_an_unsupported_core_refuses_both_ways(self):
+    def test_omitted_runtime_with_a_codex_core_matches(self):
         sw.core_runtime = lambda repo, runner=None: "codex"
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            dry_rc = self.run_cli("--dry-run")
-        self.assertEqual(dry_rc, cw.REFUSED)
-        self.assertIn("worker mode", err.getvalue())
-        self.assertEqual(self.spawned, [])
-
-        err2 = io.StringIO()
-        with contextlib.redirect_stderr(err2):
-            real_rc = self.run_cli()
-        self.assertEqual(real_rc, cw.REFUSED)
-        self.assertIn("worker mode", err2.getvalue())
-        self.assertEqual(self.spawned, [])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.run_cli("--dry-run"), 0)
+        self.assertEqual(json.loads(out.getvalue())["runtime"], "codex")
+        self.assertEqual(self.run_cli(), 0)
+        self.assertEqual(pr.load_roster(self.ws)["workers"][self.spawned[-1]]["runtime"],
+                         "codex")
 
     def test_explicit_supported_runtime_is_honored(self):
         out = io.StringIO()
