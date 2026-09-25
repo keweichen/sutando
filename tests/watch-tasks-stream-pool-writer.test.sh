@@ -2,7 +2,7 @@
 # The pool done-flag writer, reached from the core's handler runner.
 #
 # Three things the runner must get right, each with its control:
-#   1. Without a pool (no SUTANDO_INSTANCE_ID / SUTANDO_POOL_DELIVERY_SCRIPT) the
+#   1. Without a pool (no SUTANDO_INSTANCE_ID) the
 #      hook is a no-op and the handler runs exactly as before -- the no-pool host
 #      must be byte-for-byte untouched.
 #   2. With a pool, the writer runs through the repo's RESOLVED interpreter, not
@@ -21,6 +21,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 WATCHER="$REPO/src/watch-tasks-stream.sh"
+NOTIFIER="$REPO/src/agent/codex/cli/task-notifier.sh"
+STAGE_WRITER="$REPO/src/delivery/worker-stage.sh"
 WRITER="$REPO/skills/worker-pool/scripts/pool_delivery.py"
 PY="$(command -v python3)"
 
@@ -29,18 +31,21 @@ check() {  # check <label> <expected> <actual>
     if [ "$2" = "$3" ]; then echo "  ok   $1"; else echo "  FAIL $1: expected '$2', got '$3'"; fail=1; fi
 }
 
-# ── structural: the parent-side call sites exist and use the resolved interpreter ──
+# ── structural: both runtimes use one writer with their resolved interpreters ──
 hook="$(awk '/^record_worker_done\(\) \{/,/^\}/' "$WATCHER")"
-check "the hook runs the writer through SUTANDO_PY_BIN, not the shebang" \
-      "1" "$(printf '%s\n' "$hook" | grep -c '"\$SUTANDO_PY_BIN" "\$SUTANDO_POOL_DELIVERY_SCRIPT"')"
-check "the hook refuses to run without a resolved interpreter" \
-      "1" "$(printf '%s\n' "$hook" | grep -c 'SUTANDO_PY_BIN:-}" \] || return 1')"
+check "the watcher sources the shared stage writer" \
+      "1" "$(grep -c 'source "\$__SCRIPT_DIR/delivery/worker-stage.sh"' "$WATCHER")"
+check "the Codex notifier sources the shared stage writer" \
+      "1" "$(grep -c 'source "\$REPO/src/delivery/worker-stage.sh"' "$NOTIFIER")"
+check "the watcher passes its resolved interpreter" \
+      "1" "$(printf '%s\n' "$hook" | grep -c 'write_worker_stage "\$1" "\$2" "\$3" "\${SUTANDO_PY_BIN:-}"')"
+check "the writer runs through the supplied interpreter, not the shebang" \
+      "1" "$(grep -c '"\$py" "\$writer"' "$STAGE_WRITER")"
 # "the runner is handed the resolved interpreter" (a re-exec'd `bash "$0"
 # --handler-runner` subprocess) is retired: run_handler_now() calls the
 # handler inline, in this same process, so $SUTANDO_PY_BIN is already in
 # scope for record_worker_done -- there is no separate runner to hand it to.
-# The hook's own two checks above already cover the real property (resolved
-# interpreter, not the shebang).
+# The shared writer's interpreter check above covers the same property.
 settle="$(awk '/^settle_worker_record\(\) \{/,/^\}/' "$WATCHER")"
 check "settling a record means promoting it to the published stage" \
       "1" "$(printf '%s\n' "$settle" | grep -c 'record_worker_done "\$1" done "\$WORKSPACE_DIR"')"
@@ -68,9 +73,10 @@ bad_handler="$tmp/handler-bad.sh"; printf '#!/bin/bash\nexit 7\n' > "$bad_handle
 poison="$tmp/poison"; mkdir -p "$poison"; printf '#!/bin/sh\necho POISONED-PYTHON-RAN >&2\nexit 97\n' > "$poison/python3"; chmod +x "$poison/python3"
 
 # --handler-runner (a re-exec'd subprocess mode) is retired along with the
-# rest of the async runner -- record_worker_done() itself is unchanged, so
-# extract and eval just that one function and reproduce the exact pending/
+# rest of the async runner -- extract the wrapper and source the shared writer,
+# then reproduce the exact pending/
 # run/done call sequence run_handler_now() makes, in-process, no re-exec.
+source "$STAGE_WRITER"
 eval "$(awk '/^record_worker_done\(\) \{/,/^\}/' "$WATCHER")"
 run_runner() {  # run_runner <handler> ; env comes from the caller
     local filename=task-x.txt rc
@@ -114,5 +120,33 @@ check "promote after a terminal failure: the flag replaces the pending stage" "t
 rm -rf "$ws/state/workers"; "$PY" "$WRITER" --workspace "$ws" --recipient worker-3 mark-done --task-id task-x --stage pending >/dev/null
 "$PY" "$WRITER" --workspace "$ws" --recipient worker-3 mark-done --task-id task-x --stage abandon >/dev/null
 check "abandon on fallback: the pending stage is withdrawn and nothing is promoted" "" "$(flags)"
+
+# A broken delivery script cannot authorize a handler: no result is published.
+bad_writer="$tmp/writer-bad.py"
+printf 'import sys\nsys.exit(9)\n' > "$bad_writer"
+rm -rf "$ws/state/workers"; rm -f "$ws/results/task-x.txt"
+out="$(SUTANDO_INSTANCE_ID=worker-3 SUTANDO_POOL_DELIVERY_SCRIPT="$bad_writer" SUTANDO_PY_BIN="$PY" run_runner "$ok_handler" 2>"$tmp/writer-bad.err")"
+check "nonzero pending writer: handler is not run" "HANDLER_DONE: 1 task-x.txt" "$out"
+check "nonzero pending writer: no result was published" "" "$(cat "$ws/results/task-x.txt" 2>/dev/null)"
+check "nonzero pending writer: failure is logged" "1" "$(grep -c 'could not record pending for task-x' "$tmp/writer-bad.err")"
+
+# A writer that accepts pending but fails done must not turn an already
+# published result into handler failure or fallback work.
+done_bad_writer="$tmp/writer-done-bad.py"
+cat > "$done_bad_writer" <<'PY'
+import os
+import subprocess
+import sys
+
+if sys.argv[-1] == "done":
+    sys.exit(9)
+sys.exit(subprocess.call([sys.executable, os.environ["REAL_WRITER"], *sys.argv[1:]]))
+PY
+rm -rf "$ws/state/workers"; rm -f "$ws/results/task-x.txt"
+out="$(REAL_WRITER="$WRITER" SUTANDO_INSTANCE_ID=worker-3 SUTANDO_POOL_DELIVERY_SCRIPT="$done_bad_writer" SUTANDO_PY_BIN="$PY" run_runner "$ok_handler" 2>"$tmp/done-bad.err")"
+check "nonzero done writer: handler still reports success" "HANDLER_DONE: 0 task-x.txt" "$out"
+check "nonzero done writer: result remains published" "done" "$(cat "$ws/results/task-x.txt")"
+check "nonzero done writer: pending record remains for recovery" "task-x.pending" "$(flags)"
+check "nonzero done writer: failure is logged" "1" "$(grep -c 'could not record done for task-x' "$tmp/done-bad.err")"
 
 [ "$fail" -eq 0 ] && echo "PASS — watch-tasks-stream pool writer" || { echo "FAIL — watch-tasks-stream pool writer"; exit 1; }

@@ -68,6 +68,8 @@ the worker's `runtime_session_id` is `null`, `--resume` refuses, and recovery
 starts a fresh Codex conversation with the same worker ID and inbox. The
 notifier resolves delivery sentinels to payloads in shared `tasks/`, writes
 results to shared `results/`, and records the worker's done flag.
+If the worker dies mid-turn, recovery re-delivers the task in that fresh
+conversation without memory of any partial work from the previous turn.
 
 ## Talking to the other instances (core ↔ worker)
 

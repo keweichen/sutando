@@ -14,11 +14,13 @@ import contextlib
 import io
 import json
 import os
+import plistlib
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "skills/worker-pool/scripts"))
@@ -35,12 +37,23 @@ class FakeTmux:
 
     def __init__(self, runtime="claude", launcher_fails=False):
         self.calls, self.envs, self.live = [], [], set()
+        self.loaded = set()
         self.runtime, self.launcher_fails = runtime, launcher_fails
 
     def __call__(self, argv, **kw):
         cp = subprocess.CompletedProcess
         self.calls.append(argv)
         self.envs.append(dict(kw.get("env") or {}))
+        if argv[0] == "launchctl":
+            if argv[1] == "print":
+                return cp(argv, 0 if argv[2] in self.loaded else 113, "", "")
+            if argv[1] == "bootout":
+                self.loaded.discard(argv[2])
+            if argv[1] == "bootstrap":
+                with open(argv[3], "rb") as fh:
+                    label = plistlib.load(fh)["Label"]
+                self.loaded.add(f"gui/{os.getuid()}/{label}")
+            return cp(argv, 0, "", "")
         if argv[0] == "bash" and argv[1].endswith("sutando-config.sh"):
             return cp(argv, 0, self.runtime + "\n", "")
         if len(argv) > 2 and argv[2] == "watcher-sentinel":
@@ -68,10 +81,21 @@ class FakeTmux:
 
 class Base(unittest.TestCase):
     def setUp(self):
-        self.ws = Path(tempfile.mkdtemp())
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.ws = Path(tmp.name)
+        self.la = self.ws / "LaunchAgents"
+        real_ensure = sw.ensure_remedy_timer
+        patcher = mock.patch.object(
+            sw, "ensure_remedy_timer",
+            side_effect=lambda ws, repo, **kw: real_ensure(ws, repo, launch_agents=self.la, **kw))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.t = FakeTmux()
         first = sw.spawn(self.ws, REPO, cwd=str(REPO), socket=SOCK, label="alpha",
                          runner=self.t, require_sentinel=False)
+        if sys.platform == "darwin":
+            self.assertEqual(Path(first["remedy_timer"]["plist"]).parent, self.la)
         self.wid, self.session, self.inbox = (first["worker_id"], first["runtime_session_id"],
                                               first["delivery_dir"])
         sup.pr.register_worker(self.ws, self.wid, "alpha", runtime="claude")
@@ -118,12 +142,21 @@ class CodexRecovery(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.ws = Path(self.tmp.name)
+        self.la = self.ws / "LaunchAgents"
+        real_ensure = sw.ensure_remedy_timer
+        patcher = mock.patch.object(
+            sw, "ensure_remedy_timer",
+            side_effect=lambda ws, repo, **kw: real_ensure(ws, repo, launch_agents=self.la, **kw))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.cwd = self.ws / "project"
         self.cwd.mkdir()
         self.t = FakeTmux(runtime="codex")
         first = sw.spawn(self.ws, REPO, runtime="codex", cwd=str(self.cwd),
                          socket=SOCK, label="Codex reviewer", runner=self.t,
                          require_sentinel=False)
+        if sys.platform == "darwin":
+            self.assertEqual(Path(first["remedy_timer"]["plist"]).parent, self.la)
         self.wid = first["worker_id"]
         self.inbox = first["delivery_dir"]
         sup.pr.register_worker(self.ws, self.wid, "Codex reviewer", runtime="codex")

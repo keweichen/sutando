@@ -15,11 +15,14 @@ Run: python3 tests/skills/worker-pool/spawn-worker-runtime-and-sentinel.test.py
 from __future__ import annotations
 
 import importlib.util
+import os
+import plistlib
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 SCRIPTS = Path(__file__).resolve().parents[3] / "skills/worker-pool/scripts"
@@ -36,8 +39,19 @@ class Runner:
     real, and records what the launcher was asked to run."""
     def __init__(self, runtime="claude", existing=()):
         self.launches, self.existing, self.runtime = [], set(existing), runtime
+        self.loaded = set()
 
     def __call__(self, argv, **kw):
+        if argv[0] == "launchctl":
+            if argv[1] == "print":
+                return subprocess.CompletedProcess(argv, 0 if argv[2] in self.loaded else 113, "", "")
+            if argv[1] == "bootout":
+                self.loaded.discard(argv[2])
+            if argv[1] == "bootstrap":
+                with open(argv[3], "rb") as fh:
+                    label = plistlib.load(fh)["Label"]
+                self.loaded.add(f"gui/{os.getuid()}/{label}")
+            return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[0] == "bash" and argv[1].endswith("sutando-config.sh"):
             return subprocess.CompletedProcess(argv, 0, self.runtime + "\n", "")
         if argv[0] == "bash" and argv[1].endswith("launch-worker-session.sh"):
@@ -102,6 +116,13 @@ class TestRuntimeSelector(unittest.TestCase):
         self._t = tempfile.TemporaryDirectory()
         self.addCleanup(self._t.cleanup)
         self.ws = Path(self._t.name)
+        self.la = self.ws / "LaunchAgents"
+        real_ensure = sw.ensure_remedy_timer
+        patcher = mock.patch.object(
+            sw, "ensure_remedy_timer",
+            side_effect=lambda ws, repo, **kw: real_ensure(ws, repo, launch_agents=self.la, **kw))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_the_plan_hands_the_launcher_no_runtime_selector(self):
         """The runtime is an environment value, not a dispatcher argv flag."""
@@ -114,6 +135,8 @@ class TestRuntimeSelector(unittest.TestCase):
     def test_the_spawn_launches_the_workers_own_script(self):
         r = Runner()
         got = sw.spawn(self.ws, REPO, runner=r, require_sentinel=False)
+        if sys.platform == "darwin":
+            self.assertEqual(Path(got["remedy_timer"]["plist"]).parent, self.la)
         self.assertEqual(len(r.launches), 1)
         argv = r.launches[0]
         self.assertNotIn("--runtime", argv)

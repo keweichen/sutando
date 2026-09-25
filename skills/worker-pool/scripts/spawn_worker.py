@@ -222,19 +222,68 @@ def ensure_remedy_timer(workspace, repo, *, runner=None,
     if sys.platform != "darwin":
         return {"ensured": False, "why": "launchd is macOS-only"}
     try:
-        st = prt.status(launch_agents=launch_agents, runner=runner)
-        # `pool_remedy` calls spawn() from inside this job, so re-installing
-        # a healthy timer would bootout the job currently running.
-        same_target = (st.get("workspace") and st.get("repo")
-                       and Path(st["workspace"]).resolve() == Path(workspace).resolve()
-                       and Path(st["repo"]).resolve() == Path(repo).resolve())
-        if st.get("installed") and st.get("loaded") and same_target:
-            return {"ensured": False, "why": "already installed",
-                    "plist": st.get("plist")}
-        out = prt.install(workspace, repo, launch_agents=launch_agents,
-                          runner=runner)
-        return {"ensured": True, "plist": out.get("plist"),
-                "interval_s": out.get("interval_s"), "loaded": out.get("loaded")}
+        with prt.timer_lock(launch_agents):
+            st = prt.status(workspace, launch_agents=launch_agents, runner=runner)
+            if st.get("installed"):
+                if (st.get("error") or not st.get("repo") or not st.get("workspace")
+                        or not st.get("script")):
+                    return {"ensured": False, "conflict": True, "plist": st["plist"],
+                            "why": f"refusing to replace unreadable timer: "
+                                   f"{st.get('error', 'missing target paths')}"}
+                if (Path(st["workspace"]).resolve() != Path(workspace).resolve()
+                        or Path(st["repo"]).resolve() != Path(repo).resolve()
+                        or Path(st["script"]).resolve() != Path(prt.remedy_script_path()).resolve()):
+                    return {"ensured": False, "conflict": True, "plist": st["plist"],
+                            "why": f"timer is bound to workspace {st['workspace']} and "
+                                   f"repo {st['repo']} via {st['script']}; refusing automatic "
+                                   f"rebind to {Path(workspace).resolve()}, "
+                                   f"{Path(repo).resolve()} via {prt.remedy_script_path()}"}
+            elif st.get("loaded"):
+                return {"ensured": False, "conflict": True, "plist": st["plist"],
+                        "why": "refusing to replace a loaded timer with no readable plist"}
+
+            legacy = prt.legacy_status(launch_agents=launch_agents, runner=runner)
+            if ((legacy.get("loaded") and not legacy.get("installed"))
+                    or (legacy.get("installed")
+                        and (legacy.get("error") or not legacy.get("workspace")))):
+                return {"ensured": False, "conflict": True, "plist": legacy["plist"],
+                        "why": "refusing to migrate a legacy timer with no readable target"}
+            if (legacy.get("installed") and legacy.get("workspace")
+                    and Path(legacy["workspace"]).resolve() == Path(workspace).resolve()
+                    and (not legacy.get("repo")
+                         or not legacy.get("script")
+                         or Path(legacy["repo"]).resolve() != Path(repo).resolve()
+                         or Path(legacy["script"]).resolve()
+                         != Path(prt.remedy_script_path()).resolve())):
+                return {"ensured": False, "conflict": True, "plist": legacy["plist"],
+                    "why": f"legacy timer for this workspace is bound to repo "
+                               f"{legacy.get('repo')} via {legacy.get('script')}; refusing "
+                               f"automatic rebind to {Path(repo).resolve()} via "
+                               f"{prt.remedy_script_path()}"}
+            if (legacy.get("installed") and legacy.get("workspace")
+                    and Path(legacy["workspace"]).resolve() == Path(workspace).resolve()):
+                if st.get("installed"):
+                    return {"ensured": False, "conflict": True, "plist": legacy["plist"],
+                            "why": "both legacy and workspace timers are installed; "
+                                   "run an explicit install to retire the legacy job"}
+                if legacy.get("loaded"):
+                    # pool_remedy can spawn a worker from inside this very job.
+                    # An automatic migration would bootout its own parent sweep.
+                    return {"ensured": False, "why": "already installed",
+                            "plist": legacy["plist"], "label": legacy["label"],
+                            "legacy_retained": True}
+                return {"ensured": False, "conflict": True, "plist": legacy["plist"],
+                        "why": "legacy timer is installed but not loaded; "
+                               "run an explicit install to migrate it"}
+            if st.get("loaded"):
+                return {"ensured": False, "why": "already installed",
+                        "plist": st["plist"], "label": st["label"]}
+
+            out = prt.install(workspace, repo, launch_agents=launch_agents,
+                              runner=runner)
+            return {"ensured": True, "plist": out["plist"], "label": out["label"],
+                    "interval_s": out["interval_s"], "loaded": out["loaded"],
+                    "legacy_migrated": out["legacy_migrated"]}
     except (RuntimeError, OSError, ValueError) as e:
         return {"ensured": False, "why": f"{type(e).__name__}: {e}"}
 

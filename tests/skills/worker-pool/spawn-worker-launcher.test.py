@@ -14,11 +14,14 @@ Run: python3 tests/skills/worker-pool/spawn-worker-launcher.test.py
 from __future__ import annotations
 
 import json
+import os
+import plistlib
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "skills/worker-pool/scripts"))
@@ -35,10 +38,21 @@ class FakeTmux:
     def __init__(self, existing=(), fail_on=None, runtime="claude"):
         self.calls, self.existing, self.fail_on = [], set(existing), fail_on
         self.envs, self.runtime = [], runtime
+        self.loaded = set()
 
     def __call__(self, argv, **kw):
         self.calls.append(argv)
         self.envs.append(dict(kw.get("env") or {}))
+        if argv[0] == "launchctl":
+            if argv[1] == "print":
+                return subprocess.CompletedProcess(argv, 0 if argv[2] in self.loaded else 113, "", "")
+            if argv[1] == "bootout":
+                self.loaded.discard(argv[2])
+            if argv[1] == "bootstrap":
+                with open(argv[3], "rb") as fh:
+                    label = plistlib.load(fh)["Label"]
+                self.loaded.add(f"gui/{os.getuid()}/{label}")
+            return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[0] == "bash" and argv[1].endswith("sutando-config.sh"):
             return subprocess.CompletedProcess(argv, 0, self.runtime + "\n", "")
         if argv[0] == "bash" and argv[1].endswith("launch-worker-session.sh"):
@@ -112,6 +126,13 @@ class Base(unittest.TestCase):
         self._t = tempfile.TemporaryDirectory()
         self.addCleanup(self._t.cleanup)
         self.ws = Path(self._t.name)
+        self.la = self.ws / "LaunchAgents"
+        real_ensure = sw.ensure_remedy_timer
+        patcher = mock.patch.object(
+            sw, "ensure_remedy_timer",
+            side_effect=lambda ws, repo, **kw: real_ensure(ws, repo, launch_agents=self.la, **kw))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 class TestPlan(Base):
@@ -182,6 +203,8 @@ class TestSpawn(Base):
     def test_all_four_parts_exist(self):
         t = FakeTmux()
         got = sw.spawn(self.ws, REPO, runner=t, require_sentinel=False)
+        if sys.platform == "darwin":
+            self.assertEqual(Path(got["remedy_timer"]["plist"]).parent, self.la)
         w = got["worker_id"]
         self.assertTrue((self.ws / "deliveries" / w).is_dir(), "delivery folder")
         self.assertEqual(len(wi.sessions(self.ws, w)), 1, "lineage")

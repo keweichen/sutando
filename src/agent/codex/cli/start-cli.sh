@@ -15,9 +15,9 @@ cd "$REPO"
 . "$REPO/src/agent/restart-guard.sh"
 
 # This entry point only launches the canonical core. A Codex pool worker uses
-# skills/worker-pool/scripts/launch-codex-worker-session.sh instead.
+# the pool's runtime launcher instead.
 if [ -n "${SUTANDO_INSTANCE_ID:-}" ]; then
-  echo "start-cli: SUTANDO_INSTANCE_ID is set; launch Codex workers with skills/worker-pool/scripts/launch-codex-worker-session.sh." >&2
+  echo "start-cli: SUTANDO_INSTANCE_ID is set; launch Codex workers through the pool launcher." >&2
   exit 2
 fi
 

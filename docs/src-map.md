@@ -312,6 +312,7 @@ One entry per agent-facing module. 5 without a usable header comment.
 - **`readiness.py`** — Readiness of a `results/<task-id>.txt` file, for every delivery consumer.
 - **`router.py`** — Result Router — fallback & audit policy (Result Router v1, slice S4).
 - **`task_dispatch.py`** — Consumer-side dispatch policy shared by every external task-notifier.
+- **`worker-stage.sh`** — One pool delivery stage writer for the Claude watcher and Codex notifier.
 
 ## `src/hitl/`
 

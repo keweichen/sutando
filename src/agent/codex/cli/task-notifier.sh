@@ -25,6 +25,8 @@ CLAIMS_DIR="$WORKSPACE_DIR/state/task-event-handler-claims"
 # shellcheck source=../../../../scripts/python-binary.sh
 . "$REPO/scripts/python-binary.sh"
 NOTIFIER_PY="$(require_python "$REPO" "resolve pane state")" || exit 1
+# shellcheck source=../../../delivery/worker-stage.sh
+source "$REPO/src/delivery/worker-stage.sh"
 POLL_INTERVAL="${SUTANDO_NOTIFIER_POLL_INTERVAL:-0.5}"
 COMPLETION_TIMEOUT="${SUTANDO_NOTIFIER_COMPLETION_TIMEOUT:-3600}"
 CORE_READY_TIMEOUT="${SUTANDO_NOTIFIER_CORE_READY_TIMEOUT:-300}"
@@ -103,16 +105,15 @@ has_result() {
 }
 
 mark_worker_stage() {
-  [ -n "${WORKER_INSTANCE:-}" ] || return 0
-  [ -f "${SUTANDO_POOL_DELIVERY_SCRIPT:-}" ] || return 1
-  "$NOTIFIER_PY" "$SUTANDO_POOL_DELIVERY_SCRIPT" \
-    --workspace "$WORKSPACE_DIR" --recipient "$WORKER_INSTANCE" \
-    mark-done --task-id "${1%.txt}" --stage "$2" >/dev/null
-  if [ "$2" = done ]; then
-    "$NOTIFIER_PY" "$SUTANDO_POOL_DELIVERY_SCRIPT" \
+  write_worker_stage "$1" "$2" "$WORKSPACE_DIR" "$NOTIFIER_PY" || return 1
+  if [ "$2" = done ] && [ "$WORKER_STAGE_WRITE_SUCCEEDED" = 1 ]; then
+    if ! "$NOTIFIER_PY" "$SUTANDO_POOL_DELIVERY_SCRIPT" \
       --workspace "$WORKSPACE_DIR" --recipient "$WORKER_INSTANCE" \
-      prune-spent >/dev/null
+      prune-spent >/dev/null; then
+      log_notifier "could not prune spent delivery sentinels after $1"
+    fi
   fi
+  return 0
 }
 
 # What the pane text MEANS (idle footer, gate signatures, working marker, the
@@ -312,7 +313,9 @@ submit_task() {
     prompt="Sutando task ready: $filename. Worker $WORKER_INSTANCE: read $(task_payload "$filename"), complete only this delivered task, use AGENTS.md for code conventions but skip core operations, do not create task files, and write the result to $RESULTS_DIR/$filename."
   fi
   if ! tmux -S "$TMUX_SOCKET" has-session -t "=$SESSION" 2>/dev/null; then
-    exit 0
+    if [ "$wait_for_result" = "1" ]; then exit 0; fi
+    log_notifier "refusing --event $filename: Codex session is unavailable"
+    return 1
   fi
   # The managed queue path waits for completion, so a private temp file can
   # safely live for exactly the task turn.  The diagnostic --event path keeps
@@ -324,14 +327,25 @@ submit_task() {
     fi
   fi
   # Type + verify staged, then C-m + verify dispatched — see deliver_prompt.
-  # A refusal (composer holds a real unsent draft) must not crash the notifier
-  # under set -e: leave the task file unclaimed so the watcher's next idle
-  # cycle retries it, instead of exiting the whole process on one busy pane.
-  mark_worker_stage "$filename" pending
-  if ! deliver_prompt "$filename" "$prompt"; then
-    log_notifier "deferring $filename: composer was not idle-ready, will retry on the next idle cycle"
+  # A failed pending write blocks typing and keeps the queue head for retry.
+  # On composer refusal, retain pending: abandon would retire its sentinel.
+  if ! mark_worker_stage "$filename" pending; then
     clear_workstream_context
-    return 0
+    if [ "$wait_for_result" = "1" ]; then
+      log_notifier "deferring $filename: could not record worker ownership; will retry on the next idle cycle"
+      return 0
+    fi
+    log_notifier "refusing --event $filename: could not record worker ownership"
+    return 1
+  fi
+  if ! deliver_prompt "$filename" "$prompt"; then
+    clear_workstream_context
+    if [ "$wait_for_result" = "1" ]; then
+      log_notifier "deferring $filename: composer was not idle-ready, will retry on the next idle cycle"
+      return 0
+    fi
+    log_notifier "refusing --event $filename: composer was not idle-ready"
+    return 1
   fi
 
   # Codex's interactive input is not a durable multi-message queue: sending a
@@ -362,7 +376,7 @@ submit_task() {
 
 if [ "${1:-}" = "--event" ]; then
   [ -n "${2:-}" ] || { echo "task-notifier: --event requires a filename" >&2; exit 2; }
-  submit_task "$2"
+  submit_task "$2" || exit 1
   exit 0
 fi
 
