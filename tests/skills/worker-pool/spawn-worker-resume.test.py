@@ -92,8 +92,11 @@ class ResumeKeepsIdentity(HermeticSpawnTest):
     def test_resume_reuses_the_worker_id_and_inbox(self):
         t = FakeTmux()
         first = _spawned(self.ws, self.repo, t)
-        self.assertEqual(Path(first["remedy_timer"]["plist"]).parent, self.la,
-                         "a resume test wrote a timer under the real LaunchAgents directory")
+        if sys.platform == "darwin":
+            self.assertEqual(Path(first["remedy_timer"]["plist"]).parent, self.la,
+                             "a resume test wrote a timer under the real LaunchAgents directory")
+        else:
+            self.assertEqual(first["remedy_timer"]["why"], "launchd is macOS-only")
         t.existing.clear()          # the reboot: records survive, processes do not
 
         again = sw.spawn(self.ws, self.repo, cwd=str(self.repo), socket="/tmp/t.sock",

@@ -30,6 +30,8 @@ def _load(name):
 
 sys.path.insert(0, str(SCRIPTS))
 sw = _load("spawn_worker")
+# Exercise macOS timer behavior on every CI host with a fake launchctl and temp LaunchAgents.
+sys.platform = "darwin"
 
 fails = 0
 
