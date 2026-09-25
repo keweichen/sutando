@@ -305,8 +305,6 @@ def spawn(workspace, repo, *, runtime=None, cwd: str = "",
         raise SpawnRefused("Codex cannot resume without a recorded CLI session id")
     if existing_worker_id and runtime != "codex":
         raise SpawnRefused("fresh recovery by worker id is only supported for Codex")
-    if existing_worker_id and resume:
-        raise SpawnRefused("worker-id recovery cannot also resume a session")
     if existing_worker_id and not wi.worker_dir(workspace, existing_worker_id).is_dir():
         raise SpawnRefused(f"worker {existing_worker_id!r} has no identity record")
     if existing_worker_id:

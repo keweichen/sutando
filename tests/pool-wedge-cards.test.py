@@ -272,6 +272,20 @@ class CodexCards(unittest.TestCase):
                          {req.id: "refused"})
         self.assertEqual(recheck.acted(), [])
 
+    def test_missing_roster_row_never_guesses_the_runtime_or_opens_a_card(self):
+        roster = self.ws / "state" / "roster.json"
+        data = json.loads(roster.read_text())
+        del data["workers"][WID]
+        roster.write_text(json.dumps(data))
+        t = Tmux(CODEX_FROZEN)
+
+        out = wc.raise_card(self.ws, WID, FROZEN, runner=t, manager=manager(self.ws))
+
+        self.assertEqual(out, {"worker_id": WID, "outcome": "indeterminate",
+                               "probe": "worker runtime unavailable"})
+        self.assertEqual(t.calls, [])
+        self.assertEqual(manager(self.ws).active(), [])
+
 
 class CardEdges(unittest.TestCase):
     def setUp(self):

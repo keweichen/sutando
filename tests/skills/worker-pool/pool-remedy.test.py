@@ -196,6 +196,16 @@ class CodexRecovery(unittest.TestCase):
         self.assertEqual(wi.incarnations(self.ws, self.wid), before_runs)
         self.assertEqual(len(self.t.launches()), before_launches)
 
+    def test_a_codex_worker_without_a_recorded_run_is_not_relaunched(self):
+        # The last incarnation identifies the tmux socket and folder;
+        # recovery cannot choose a target without it.
+        wi.incarnations_path(self.ws, self.wid).write_text(
+            json.dumps({"incarnations": []}))
+        before = len(self.t.launches())
+        out = rem.recover(self.ws, REPO, self.wid, runner=self.t)
+        self.assertEqual(out["outcome"], rem.NO_SESSION)
+        self.assertEqual(len(self.t.launches()), before)
+
     def test_a_failed_codex_relaunch_leaves_no_open_incarnation(self):
         self.t.launcher_fails = True
         out = rem.recover(self.ws, REPO, self.wid, runner=self.t)
@@ -240,6 +250,37 @@ class ItLeavesHonestRunRecords(Base):
 
 
 class WhatItRefusesToTouch(Base):
+    def test_an_unreadable_roster_blocks_recovery_and_supervisor_rearm(self):
+        before = wi.incarnations_path(self.ws, self.wid).read_bytes()
+        launched = len(self.t.launches())
+        with mock.patch.object(sw.pr, "load_roster", return_value=None):
+            recovered = self.recover()
+            rearmed = rem.ensure_supervisor(self.ws, REPO, self.wid, runner=self.t)
+        self.assertEqual(recovered["outcome"], rem.INDETERMINATE)
+        self.assertIn("absent from the readable roster", recovered["why"])
+        self.assertEqual(rearmed["outcome"], rem.INDETERMINATE)
+        self.assertIn("absent from the readable roster", rearmed["why"])
+        self.assertEqual(wi.incarnations_path(self.ws, self.wid).read_bytes(), before)
+        self.assertEqual(len(self.t.launches()), launched)
+        self.assertFalse(any(c[0] == "bash" and c[1].endswith("worker-watcher-supervisor.sh")
+                             for c in self.t.calls))
+
+    def test_an_unknown_roster_runtime_blocks_recovery_and_supervisor_rearm(self):
+        roster = {"workers": {self.wid: {"runtime": "unrecognised"}}}
+        before = wi.incarnations_path(self.ws, self.wid).read_bytes()
+        launched = len(self.t.launches())
+        with mock.patch.object(sw.pr, "load_roster", return_value=roster):
+            recovered = self.recover()
+            rearmed = rem.ensure_supervisor(self.ws, REPO, self.wid, runner=self.t)
+        self.assertEqual(recovered["outcome"], rem.INDETERMINATE)
+        self.assertIn("unknown worker runtime", recovered["why"])
+        self.assertEqual(rearmed["outcome"], rem.INDETERMINATE)
+        self.assertIn("unknown worker runtime", rearmed["why"])
+        self.assertEqual(wi.incarnations_path(self.ws, self.wid).read_bytes(), before)
+        self.assertEqual(len(self.t.launches()), launched)
+        self.assertFalse(any(c[0] == "bash" and c[1].endswith("worker-watcher-supervisor.sh")
+                             for c in self.t.calls))
+
     def test_a_paused_worker_is_never_relaunched(self):
         (wi.worker_dir(self.ws, self.wid) / sup.PAUSED_MARKER).touch()
         self.assertEqual(self.recover()["outcome"], rem.PAUSED)

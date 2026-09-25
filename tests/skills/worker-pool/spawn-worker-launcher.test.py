@@ -199,6 +199,49 @@ class TestRefusals(Base):
         self.assertIn("did not come up", str(e.exception))
 
 
+class TestAutomaticRemedyTimer(Base):
+    def _ensure_as_macos(self, runner):
+        # The CI runner is Linux. Exercise macOS's real timer decision logic,
+        # while Base redirects every plist into this test's temporary folder.
+        with mock.patch.object(sys, "platform", "darwin"):
+            return sw.ensure_remedy_timer(self.ws, REPO, runner=runner)
+
+    def test_an_unreadable_workspace_timer_is_not_replaced(self):
+        path = sw.prt.plist_path(self.ws, self.la)
+        path.parent.mkdir(parents=True)
+        path.write_text("not a plist")
+        runner = FakeTmux()
+        out = self._ensure_as_macos(runner)
+        self.assertTrue(out["conflict"])
+        self.assertIn("unreadable timer", out["why"])
+        self.assertEqual(path.read_text(), "not a plist")
+        self.assertFalse(any(c[0] == "launchctl" and c[1] in ("bootout", "bootstrap")
+                             for c in runner.calls))
+
+    def test_a_loaded_workspace_timer_with_no_plist_is_not_replaced(self):
+        runner = FakeTmux()
+        target = sw.prt.service_target(self.ws)
+        runner.loaded.add(target)
+        out = self._ensure_as_macos(runner)
+        self.assertTrue(out["conflict"])
+        self.assertIn("loaded timer with no readable plist", out["why"])
+        self.assertIn(target, runner.loaded)
+        self.assertFalse(any(c[0] == "launchctl" and c[1] in ("bootout", "bootstrap")
+                             for c in runner.calls))
+
+    def test_an_unreadable_legacy_timer_is_not_migrated(self):
+        path = sw.prt.legacy_plist_path(self.la)
+        path.parent.mkdir(parents=True)
+        path.write_text("not a plist")
+        runner = FakeTmux()
+        out = self._ensure_as_macos(runner)
+        self.assertTrue(out["conflict"])
+        self.assertIn("legacy timer with no readable target", out["why"])
+        self.assertEqual(path.read_text(), "not a plist")
+        self.assertFalse(any(c[0] == "launchctl" and c[1] in ("bootout", "bootstrap")
+                             for c in runner.calls))
+
+
 class TestSpawn(Base):
     def test_all_four_parts_exist(self):
         t = FakeTmux()
@@ -409,6 +452,45 @@ class TestRuntimeStartFailure(Base):
                      runner=t, require_sentinel=False)
         self.assertFalse((self.ws / "state" / "workers").exists())
         self.assertFalse((self.ws / "deliveries").exists())
+
+
+class TestWorkerIdRecoveryRefusals(Base):
+    def test_only_codex_can_restart_by_worker_id(self):
+        wid = "a" * 32
+        runner = FakeTmux()
+        with self.assertRaisesRegex(sw.SpawnRefused, "only supported for Codex"):
+            sw.spawn(self.ws, REPO, runtime="claude", existing_worker_id=wid,
+                     runner=runner, require_sentinel=False)
+        self.assertFalse(wi.worker_dir(self.ws, wid).exists())
+        self.assertFalse(any(c[0] == "bash" and c[1].endswith("launch-worker-session.sh")
+                             for c in runner.calls))
+
+    def test_codex_recovery_requires_an_identity_record(self):
+        wid = "b" * 32
+        runner = FakeTmux(runtime="codex")
+        with self.assertRaisesRegex(sw.SpawnRefused, "no identity record"):
+            sw.spawn(self.ws, REPO, runtime="codex", existing_worker_id=wid,
+                     runner=runner, require_sentinel=False)
+        self.assertFalse(Path(sw.plan(self.ws, REPO, runtime="codex",
+                                      worker_id=wid)["delivery_dir"]).exists())
+        self.assertFalse(any(c[0] == "bash" and c[1].endswith("launch-worker-session.sh")
+                             for c in runner.calls))
+
+    def test_codex_recovery_requires_a_codex_roster_row(self):
+        wid = "c" * 32
+        wi.create_worker(self.ws, runtime="codex", worker_id=wid, cwd=str(REPO))
+        record = wi.incarnations_path(self.ws, wid).read_bytes()
+        runner = FakeTmux(runtime="codex")
+        for roster in (None, {"workers": {wid: {"runtime": "claude"}}}):
+            with self.subTest(roster=roster), mock.patch.object(sw.pr, "load_roster",
+                                                         return_value=roster):
+                with self.assertRaisesRegex(sw.SpawnRefused, "not a rostered Codex worker"):
+                    sw.spawn(self.ws, REPO, runtime="codex", existing_worker_id=wid,
+                             runner=runner, require_sentinel=False)
+                self.assertEqual(wi.incarnations_path(self.ws, wid).read_bytes(), record)
+                self.assertFalse((self.ws / "deliveries" / wid).exists())
+        self.assertFalse(any(c[0] == "bash" and c[1].endswith("launch-worker-session.sh")
+                             for c in runner.calls))
 
 
 class TestSentinelProbe(Base):
