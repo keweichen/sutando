@@ -91,7 +91,10 @@ def resolve(workspace, name: str) -> str:
     roster = pr.load_roster(workspace)
     if roster is None:
         raise ValueError("no roster: this host has no pool to ask")
-    rid = pr.resolve_label(roster, name)
+    try:
+        rid = pr.resolve_label(roster, name)
+    except pr.AmbiguousWorkerName as e:
+        raise ValueError(str(e)) from e
     if pr.unknown_targets(roster, [rid]):
         raise ValueError(f"no such recipient: {name!r}")
     return rid

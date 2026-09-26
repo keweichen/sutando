@@ -47,6 +47,10 @@ class RosterError(Exception):
     """A declaration the roster cannot represent, refused at compile time."""
 
 
+class AmbiguousWorkerName(RosterError):
+    """A requested name would select more than one recipient."""
+
+
 class PublishError(OSError):
     """The roster was written but its advertisement was not: the router will
     follow the new roster, the picker will not until a publish succeeds."""
@@ -134,22 +138,25 @@ def load_roster(workspace):
 
 
 def display_label(row: dict, worker_id: str) -> str:
-    """The name shown to people; routing still uses the base label."""
+    """The name shown to people and accepted when it identifies one worker."""
     row = row if isinstance(row, dict) else {}
     return row.get("display_label") or row.get("label") or worker_id
 
 
 def resolve_label(roster: dict, name: str) -> str:
-    """A worker's base routing label to its id; anything else unchanged.
+    """Resolve an id, the core, or a unique base or display label.
 
-    An unknown or AMBIGUOUS label is returned as given, so the caller fails the
-    task by that name instead of picking one of the workers that share it.
+    An unknown name stays unchanged for the caller's usual unknown-name policy.
+    A name shared by recipients is refused, even if it is also an id or `core`.
     """
     workers = roster.get("workers") or {}
-    if name in workers or name == CORE:
-        return name
-    hits = [wid for wid, row in workers.items() if (row or {}).get("label") == name]
-    return hits[0] if len(hits) == 1 else name
+    hits = {name} if name in workers or name == CORE else set()
+    for wid, row in workers.items():
+        if name in ((row or {}).get("label"), (row or {}).get("display_label")):
+            hits.add(wid)
+    if len(hits) > 1:
+        raise AmbiguousWorkerName(f"{name!r} names more than one recipient")
+    return next(iter(hits)) if hits else name
 
 
 LEGACY_WORKER_FIELD = "target_worker"
@@ -413,23 +420,17 @@ def rename_worker(workspace, target: str, label: str) -> "tuple[str, str, dict |
         if raw is None:
             raise RosterError("no roster; nothing to rename")
         workers = dict(raw.get("workers") or {})
-        if target in workers:
-            wid = target
-        else:
-            hits = [w for w, row in workers.items() if (row or {}).get("label") == target]
-            if len(hits) > 1:
-                raise RosterError(f"{target!r} is the label of {len(hits)} workers; "
-                                  "name one by id")
-            if not hits:
-                raise RosterError(f"{target!r} is not a worker id or label")
-            wid = hits[0]
+        wid = resolve_label(raw, target)
+        if wid not in workers:
+            raise RosterError(f"{target!r} is not a worker id or label")
         old = (workers[wid] or {}).get("label") or wid
         if new == old:
             return wid, old, None
         if new == CORE:
             raise RosterError(f"{CORE!r} names the core; a worker cannot take it")
         for other, row in workers.items():
-            if other != wid and new in (other, (row or {}).get("label")):
+            if other != wid and new in (other, (row or {}).get("label"),
+                                       (row or {}).get("display_label")):
                 raise RosterError(f"{new!r} already names worker {other}")
         workers[wid] = {**(workers[wid] or {}), "label": new}
         return wid, old, compile_roster(workspace, workers, load_bindings(workspace))
@@ -437,7 +438,7 @@ def rename_worker(workspace, target: str, label: str) -> "tuple[str, str, dict |
 
 def apply_profile_label_overrides(workspace, labels: dict, config_version: int,
                                   profile_mxid: str) -> dict:
-    """Apply one complete broker display-label snapshot without changing routing names."""
+    """Apply a complete display snapshot without changing worker IDs or base labels."""
     if type(config_version) is not int or config_version < 0:
         raise RosterError("worker label config version must be a non-negative integer")
     if not isinstance(labels, dict):
@@ -484,9 +485,7 @@ def apply_profile_label_overrides(workspace, labels: dict, config_version: int,
                 row["display_label"] = wanted
                 changed = True
         if config_version == previous:
-            if changed:
-                raise RosterError("worker label config version reused with different labels")
-            if not pending:
+            if not changed and not pending:
                 _ensure_advertisement(workspace, roster)
                 return {"changed": False, "stale": False, "roster_version": roster["version"],
                         "worker_label_config_version": previous, "pending_worker_ids": []}

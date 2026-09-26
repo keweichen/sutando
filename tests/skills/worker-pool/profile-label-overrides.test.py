@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Broker display labels never change worker identity or routing aliases."""
+"""Broker display labels can address workers without changing their identity."""
 from __future__ import annotations
 
 import contextlib
@@ -19,6 +19,9 @@ sys.path.insert(0, str(SCRIPTS))
 
 import pool_advertise as pa  # noqa: E402
 import pool_ask  # noqa: E402
+
+import pool_route_handler  # noqa: E402
+import pool_router  # noqa: E402
 
 import pool_roster as pr  # noqa: E402
 import pool_sessions  # noqa: E402
@@ -46,7 +49,7 @@ class ProfileLabelOverrides(unittest.TestCase):
     def apply(self, labels, version, mxid=MXID):
         return pr.apply_profile_label_overrides(self.ws, labels, version, mxid)
 
-    def test_display_override_reaches_every_view_without_changing_routing(self):
+    def test_display_override_reaches_every_view_and_resolves_to_the_same_id(self):
         pr.bind_room(self.ws, "!room:ag2.space", W1)
         out = self.apply({W1: "Ryan", W2: "Codex test"}, 7)
         self.assertTrue(out["changed"])
@@ -57,7 +60,9 @@ class ProfileLabelOverrides(unittest.TestCase):
         self.assertEqual(roster["workers"][W1]["display_label"], "Ryan")
         self.assertEqual(pr.targets_for(roster, "!room:ag2.space"), [W1])
         self.assertEqual(pr.resolve_label(roster, "base-one"), W1)
-        self.assertEqual(pr.resolve_label(roster, "Ryan"), "Ryan")
+        self.assertEqual(pr.resolve_label(roster, "Ryan"), W1)
+        self.assertEqual(pr.targets_for(roster, "!unbound:ag2.space", "Ryan"), [W1])
+        self.assertEqual(pool_ask.resolve(self.ws, "Ryan"), W1)
         self.assertEqual(pa.profile_workers(roster)[W1], {"label": "Ryan", "runtime": "codex"})
         ad = json.loads(pa.advertisement_path(self.ws).read_text())
         self.assertEqual(ad["profile_workers"][W1]["label"], "Ryan")
@@ -80,6 +85,56 @@ class ProfileLabelOverrides(unittest.TestCase):
                                return_value={W1: roster["workers"][W1]}):
             self.assertEqual(pool_wedge_cards.seat_label(self.ws, W1), f"worker Ryan ({W1})")
 
+    def test_unique_display_name_can_bind_a_room(self):
+        self.apply({W1: "Ryan"}, 7)
+        roster = pr.bind_room(self.ws, "!review:ag2.space", "Ryan")
+        self.assertEqual(roster["bindings"]["!review:ag2.space"], W1)
+        self.assertEqual(pr.load_bindings(self.ws)["!review:ag2.space"], W1)
+
+    def test_cross_worker_name_collisions_refuse_every_routing_entry_point(self):
+        cases = [({W1: "base-two"}, "base-two"),
+                 ({W1: "Shared", W2: "Shared"}, "Shared"),
+                 ({W1: W2}, W2),
+                 ({W1: "core"}, "core")]
+        for version, (labels, name) in enumerate(cases, 7):
+            with self.subTest(name=name, labels=labels):
+                self.apply(labels, version)
+                roster = pr.load_roster(self.ws)
+                with self.assertRaises(pr.AmbiguousWorkerName):
+                    pr.resolve_label(roster, name)
+                with self.assertRaises(pr.AmbiguousWorkerName):
+                    pr.targets_for(roster, "!unbound:ag2.space", name)
+                with self.assertRaisesRegex(ValueError, "more than one recipient"):
+                    pool_ask.resolve(self.ws, name)
+                with self.assertRaisesRegex(pool_router.RouterRefused,
+                                            "more than one recipient"):
+                    pool_router.route(self.ws, {"id": "task-1", "requested_worker": name})
+                code, targets, _ = pool_route_handler.classify(
+                    self.ws, {"id": "task-1", "requested_worker": name})
+                self.assertEqual((code, targets), (pool_route_handler.MUST_HANDLE, []))
+                with self.assertRaises(pr.AmbiguousWorkerName):
+                    pr.bind_room(self.ws, "!review:ag2.space", name)
+                self.assertEqual(pr.load_bindings(self.ws), {})
+
+    def test_relabel_refuses_names_taken_by_another_workers_display(self):
+        self.apply({W2: "Ryan"}, 7)
+        with self.assertRaisesRegex(pr.RosterError, "already names worker"):
+            pr.rename_worker(self.ws, W1, "Ryan")
+        self.assertEqual(pr.load_roster(self.ws)["workers"][W1]["label"], "base-one")
+
+    def test_watcher_does_not_hand_ambiguous_core_name_to_the_core(self):
+        self.apply({W1: "core"}, 7)
+        tasks = self.ws / "tasks"
+        tasks.mkdir()
+        task = tasks / "task-ambiguous.txt"
+        task.write_text("id: task-ambiguous\nrequested_worker: core\ntask: work\n")
+        argv = ["--task-file", str(task), "--workspace", str(self.ws)]
+        self.assertEqual(pool_route_handler.main([*argv, "--probe"]),
+                         pool_route_handler.MUST_HANDLE)
+        self.assertEqual(pool_route_handler.main(argv), pool_route_handler.MUST_HANDLE)
+        self.assertFalse((self.ws / "deliveries" / "core" / "task-ambiguous.txt").exists())
+        self.assertFalse((self.ws / "deliveries" / W1 / "task-ambiguous.txt").exists())
+
     def test_removing_override_restores_base_label_and_replaying_is_byte_identical(self):
         self.apply({W1: "Ryan"}, 7)
         restored = self.apply({}, 8)
@@ -92,14 +147,23 @@ class ProfileLabelOverrides(unittest.TestCase):
         self.assertFalse(again["changed"])
         self.assertEqual(self.frozen(), frozen)
 
-    def test_stale_version_cannot_revert_and_equal_version_cannot_change_content(self):
+    def test_stale_version_cannot_revert_current_profile(self):
         self.apply({W1: "Ryan"}, 7)
         frozen = self.frozen()
         stale = self.apply({W1: "Old"}, 6)
         self.assertTrue(stale["stale"])
-        with self.assertRaisesRegex(pr.RosterError, "version reused"):
-            self.apply({W1: "Other"}, 7)
         self.assertEqual(self.frozen(), frozen)
+
+    def test_same_version_repairs_local_display_label_loss(self):
+        self.apply({W1: "Ryan"}, 7)
+        roster = pr.load_roster(self.ws)
+        roster["workers"][W1].pop("display_label")
+        pr._write_atomic(pr.roster_path(self.ws), roster)
+        repaired = self.apply({W1: "Ryan"}, 7)
+        self.assertTrue(repaired["changed"])
+        self.assertEqual(pr.load_roster(self.ws)["workers"][W1]["display_label"], "Ryan")
+        self.assertEqual(pr.load_roster(self.ws)["worker_label_config_version"], 7)
+        self.assertEqual(pa.profile_workers(pr.load_roster(self.ws))[W1]["label"], "Ryan")
 
     def test_new_version_with_same_map_only_advances_watermark(self):
         self.apply({W1: "Ryan"}, 7)

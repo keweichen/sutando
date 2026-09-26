@@ -49,13 +49,15 @@ conversation without memory of any partial work from the previous turn.
 ## Worker names and identities
 
 The 32-hex `worker_id` is stable and is the roster key, delivery recipient, and
-room binding target. The roster's base `label` is a routing alias. A unique base
-alias or the full ID can address a worker in `pool_ask --to` and other routing
-commands. `rename_worker` changes this alias without changing the ID.
+room binding target. The roster's base `label` is a routing alias.
+`rename_worker` changes it without changing the ID.
 
 AG2 Space can set an optional `display_label` override for a worker. It appears
-in the picker, session list, pool advertisement, and human status. It does not
-become a routing alias. Human status uses `name (full worker_id)`, for example
+in the picker, session list, pool advertisement, and human status. A unique
+base label, display label, or full ID can address the worker in `pool_ask --to`,
+room binding, and task requests. A name shared by recipients is refused,
+including when it equals `core` or another worker's ID. Human status uses
+`name (full worker_id)`, for example
 `kc-reviewer-ryan (274cb60d473744dba54040a9de119877)`. The `pool_ask --who`
 JSON keeps `label` as the base routing alias and adds `display_label` as the
 effective name; text adds `alias=<base label>` when the names differ. Removing
@@ -68,7 +70,8 @@ full worker ID, under the roster lock. It tracks the broker snapshot in
 to a new profile accepts that profile's lower version. Retired IDs are
 ignored; a pending unknown ID prevents the label version from advancing so a
 later poll can apply it after registration. Other roster compiles preserve
-these fields.
+these fields. A repeat of the current version repairs any local label drift
+against the owner's complete map.
 
 ## Talking to the other instances (core ↔ worker)
 
@@ -108,7 +111,7 @@ python3 skills/worker-pool/scripts/pool_ask.py --workspace "$WS" --to <label|id|
   receiver to key on. `owner` is never a tier an ask can claim, and non-owner content must
   never be relayed as your own: the tier must say where the question came from, not who ran
   the script.
-- Refused, never guessed: an unknown name, a label two workers share, and asking yourself.
+- Refused, never guessed: an unknown name, a name shared by recipients, and asking yourself.
 
 Not yet: the reply is read from `results/` by the asker, not delivered into the
 asker's inbox (`reply_to_instance` is recorded for that later leg), and a worker

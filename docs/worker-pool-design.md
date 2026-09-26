@@ -47,9 +47,11 @@ cannot prove. Pending deliveries remain assigned to that worker.
 **A worker has an id, a base label, and an optional display override.** The id is
 the worker's identity, opaque, never changed or reused; every path, filename,
 roster key and header names it. The base `label` is a mutable routing alias,
-never in a path or glob. A unique base alias resolves to an id where intent is
-captured. The optional `display_label` from AG2 Space changes only the name
-shown to people; removing it restores the base label. Human status renders the
+never in a path or glob. A unique base label, display label, or full ID resolves
+to the worker ID where intent is captured. A name shared by recipients is
+refused, even when it equals `core` or another worker ID. The optional
+`display_label` from AG2 Space also changes the name shown to people; removing
+it restores the base label. Human status renders the
 effective name with the full ID, such as
 `kc-reviewer-ryan (274cb60d473744dba54040a9de119877)`.
 
@@ -57,7 +59,7 @@ effective name with the full ID, such as
 |---|---|---|
 | `worker_id` | `7c54b230a8d94ea9b86f52d70134ac68` | routing, directories, binding references, message headers; immutable |
 | `label` | `worker-1`, `code reviewer` | base routing alias; renameable |
-| `display_label` | `kc-reviewer-ryan` | optional AG2 Space display override; never a routing target |
+| `display_label` | `kc-reviewer-ryan` | optional AG2 Space display override; unique names can address the worker |
 | `incarnation_id` | minted per session | which run of that worker accepted an attempt |
 
 **The id is `uuid.uuid4().hex`** — 32 lowercase hex, exactly the
@@ -470,9 +472,10 @@ label snapshot independently of the general `config_version`, and
 profile may start at a lower version. Unrelated roster compiles preserve both
 fields. Retired IDs are ignored. A snapshot with an unknown ID can update
 known workers, but it does not advance the label version, so a later poll can
-apply the missing worker after registration. The pool advertisement, session
-list, and human status use `display_label` when present; the roster key and
-routing alias remain unchanged.
+apply the missing worker after registration. Reapplying the current version
+repairs local label drift from the owner's map. The pool advertisement, session
+list, and human status use `display_label` when present. Routing accepts the
+display name when unique, while the roster key and base label remain unchanged.
 
 ### Router pass
 
