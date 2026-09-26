@@ -207,6 +207,15 @@ class ProfileLabelOverrides(unittest.TestCase):
         self.assertEqual(pr.load_roster(self.ws)["worker_label_config_version"], 7)
         self.assertEqual(pa.profile_workers(pr.load_roster(self.ws))[W1]["label"], "Ryan")
 
+    def test_same_version_accepts_a_new_owner_label(self):
+        self.apply({W1: "Ryan"}, 7)
+        updated = self.apply({W1: "Rian"}, 7)
+        self.assertTrue(updated["changed"])
+        roster = pr.load_roster(self.ws)
+        self.assertEqual(roster["worker_label_config_version"], 7)
+        self.assertEqual(roster["workers"][W1]["display_label"], "Rian")
+        self.assertEqual(pa.profile_workers(roster)[W1]["label"], "Rian")
+
     def test_new_version_with_same_map_only_advances_watermark(self):
         self.apply({W1: "Ryan"}, 7)
         before_roster = pr.load_roster(self.ws)
@@ -233,6 +242,15 @@ class ProfileLabelOverrides(unittest.TestCase):
         self.assertEqual(pa.profile_workers(pr.load_roster(self.ws))[W1]["label"], "Ryan")
         self.assertEqual(json.loads(pa.advertisement_path(self.ws).read_text())
                          ["profile_workers"][W1]["label"], "Ryan")
+
+    def test_advertisement_read_failure_is_reported_on_an_unchanged_replay(self):
+        self.apply({W1: "Ryan"}, 7)
+        before = self.frozen()
+        with mock.patch.object(pa, "ensure_advertisement", side_effect=OSError("disk offline")):
+            with self.assertRaises(pr.PublishError) as raised:
+                self.apply({W1: "Ryan"}, 7)
+        self.assertEqual(raised.exception.roster["worker_label_config_version"], 7)
+        self.assertEqual(self.frozen(), before)
 
     def test_reregistering_same_worker_preserves_override_at_same_version(self):
         self.apply({W1: "Ryan"}, 7)
@@ -266,6 +284,19 @@ class ProfileLabelOverrides(unittest.TestCase):
         pr.register_worker(self.ws, W3, "new-base")
         self.apply({W1: "New owner", W3: "Late"}, 1, NEXT_MXID)
         self.assertEqual(pr.load_roster(self.ws)["worker_label_config_version"], 1)
+
+    def test_new_profile_with_only_unknown_worker_records_source_without_a_version(self):
+        before_ad = pa.advertisement_path(self.ws).read_bytes()
+        result = self.apply({W3: "Late"}, 1, NEXT_MXID)
+        roster = pr.load_roster(self.ws)
+        self.assertFalse(result["changed"])
+        self.assertEqual(result["pending_worker_ids"], [W3])
+        self.assertEqual(roster["worker_label_profile_mxid"], NEXT_MXID)
+        self.assertNotIn("worker_label_config_version", roster)
+        self.assertEqual(pa.advertisement_path(self.ws).read_bytes(), before_ad)
+        pr.register_worker(self.ws, W3, "base-three")
+        self.apply({W3: "Late"}, 1, NEXT_MXID)
+        self.assertEqual(pr.load_roster(self.ws)["workers"][W3]["display_label"], "Late")
 
     def test_retired_override_does_not_hold_the_cursor(self):
         roster = pr.load_roster(self.ws)
@@ -302,6 +333,26 @@ class ProfileLabelOverrides(unittest.TestCase):
             with self.subTest(labels=labels, version=version):
                 with self.assertRaises(pr.RosterError):
                     self.apply(labels, version)
+                self.assertEqual(self.frozen(), frozen)
+
+    def test_missing_roster_and_invalid_profile_identity_are_refused(self):
+        with tempfile.TemporaryDirectory() as empty:
+            with self.assertRaisesRegex(pr.RosterError, "no roster"):
+                pr.apply_profile_label_overrides(empty, {W1: "Ryan"}, 1, MXID)
+        frozen = self.frozen()
+        with self.assertRaisesRegex(pr.RosterError, "profile mxid is invalid"):
+            self.apply({W1: "Ryan"}, 1, "agent-one:ag2.space")
+        self.assertEqual(self.frozen(), frozen)
+
+    def test_corrupt_label_cursor_is_refused_without_changing_the_roster(self):
+        original = pr.load_roster(self.ws)
+        for bad in ({"worker_label_config_version": -1},
+                    {"worker_label_profile_mxid": 42}):
+            with self.subTest(bad=bad):
+                pr._write_atomic(pr.roster_path(self.ws), {**original, **bad})
+                frozen = self.frozen()
+                with self.assertRaisesRegex(pr.RosterError, "stored worker label"):
+                    self.apply({W1: "Ryan"}, 1)
                 self.assertEqual(self.frozen(), frozen)
 
     def test_other_roster_writers_keep_the_label_version_and_override(self):
