@@ -41,6 +41,7 @@ CORE = "core"
 STATES = ("live", "recovering", "abandoned", "retired")
 MAX_DISPLAY_LABEL_LENGTH = 120
 PROFILE_WORKER_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+RESERVED_DISPLAY_ID_RE = re.compile(r"^[0-9a-f]{32}$", re.IGNORECASE)
 
 
 class RosterError(Exception):
@@ -144,13 +145,16 @@ def display_label(row: dict, worker_id: str) -> str:
 
 
 def resolve_label(roster: dict, name: str) -> str:
-    """Resolve an id, the core, or a unique base or display label.
+    """Resolve an exact id or core, then a unique base or display label.
 
     An unknown name stays unchanged for the caller's usual unknown-name policy.
-    A name shared by recipients is refused, even if it is also an id or `core`.
+    Human names shared by recipients are refused. Exact recipient names win so
+    an old stored display label cannot make an id or the core unavailable.
     """
     workers = roster.get("workers") or {}
-    hits = {name} if name in workers or name == CORE else set()
+    if name in workers or name == CORE:
+        return name
+    hits = set()
     for wid, row in workers.items():
         if name in ((row or {}).get("label"), (row or {}).get("display_label")):
             hits.add(wid)
@@ -365,10 +369,14 @@ def register_worker(workspace, worker_id: str, label: str, room=None, runtime=No
     drops one of them from the result.
     """
     with _locked(workspace):
-        # Before any durable write: a registration that survived a failed publish
-        # would leave a real pool the launcher cannot distinguish from no pool.
-        publish_task_event_handler(workspace)
         workers = dict((_load_existing_roster_strict(workspace) or {}).get("workers") or {})
+        for other, row in workers.items():
+            if other != worker_id and isinstance(row, dict) and worker_id in (
+                    row.get("label"), row.get("display_label")):
+                raise RosterError(f"worker id {worker_id!r} conflicts with worker {other}'s name")
+        # Before roster or binding writes: a registration that survived a failed
+        # handler publish would leave a pool the launcher cannot recognize.
+        publish_task_event_handler(workspace)
         previous = workers.get(worker_id) or {}
         workers[worker_id] = {"state": "live", "label": label or worker_id}
         if isinstance(previous, dict) and "display_label" in previous:
@@ -472,6 +480,9 @@ def apply_profile_label_overrides(workspace, labels: dict, config_version: int,
             if not isinstance(wid, str) or not PROFILE_WORKER_ID_RE.fullmatch(wid):
                 raise RosterError(f"invalid worker id in display labels: {wid!r}")
             _validate_display_label(label, wid)
+            if (label == CORE or RESERVED_DISPLAY_ID_RE.fullmatch(label)
+                    or (label in workers and label != wid)):
+                raise RosterError(f"worker {wid!r} display label uses a reserved recipient name")
             if wid not in workers:
                 pending.append(wid)
         changed = False

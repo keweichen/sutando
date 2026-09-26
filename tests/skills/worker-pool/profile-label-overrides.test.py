@@ -93,9 +93,7 @@ class ProfileLabelOverrides(unittest.TestCase):
 
     def test_cross_worker_name_collisions_refuse_every_routing_entry_point(self):
         cases = [({W1: "base-two"}, "base-two"),
-                 ({W1: "Shared", W2: "Shared"}, "Shared"),
-                 ({W1: W2}, W2),
-                 ({W1: "core"}, "core")]
+                 ({W1: "Shared", W2: "Shared"}, "Shared")]
         for version, (labels, name) in enumerate(cases, 7):
             with self.subTest(name=name, labels=labels):
                 self.apply(labels, version)
@@ -122,18 +120,62 @@ class ProfileLabelOverrides(unittest.TestCase):
             pr.rename_worker(self.ws, W1, "Ryan")
         self.assertEqual(pr.load_roster(self.ws)["workers"][W1]["label"], "base-one")
 
-    def test_watcher_does_not_hand_ambiguous_core_name_to_the_core(self):
-        self.apply({W1: "core"}, 7)
+    def test_watcher_does_not_hand_ambiguous_human_name_to_the_core(self):
+        self.apply({W1: "base-two"}, 7)
         tasks = self.ws / "tasks"
         tasks.mkdir()
         task = tasks / "task-ambiguous.txt"
-        task.write_text("id: task-ambiguous\nrequested_worker: core\ntask: work\n")
+        task.write_text("id: task-ambiguous\nrequested_worker: base-two\ntask: work\n")
         argv = ["--task-file", str(task), "--workspace", str(self.ws)]
         self.assertEqual(pool_route_handler.main([*argv, "--probe"]),
                          pool_route_handler.MUST_HANDLE)
         self.assertEqual(pool_route_handler.main(argv), pool_route_handler.MUST_HANDLE)
         self.assertFalse((self.ws / "deliveries" / "core" / "task-ambiguous.txt").exists())
         self.assertFalse((self.ws / "deliveries" / W1 / "task-ambiguous.txt").exists())
+        self.assertFalse((self.ws / "deliveries" / W2 / "task-ambiguous.txt").exists())
+
+    def test_exact_id_and_core_work_despite_older_stored_reserved_names(self):
+        for reserved, expected_code in ((W2, 0), ("core", pool_route_handler.DECLINE)):
+            with self.subTest(reserved=reserved):
+                roster = pr.load_roster(self.ws)
+                roster["workers"][W1]["display_label"] = reserved
+                pr._write_atomic(pr.roster_path(self.ws), roster)
+                self.assertEqual(pr.resolve_label(roster, reserved), reserved)
+                self.assertEqual(pr.targets_for(roster, "!unbound:ag2.space", reserved), [reserved])
+                self.assertEqual(pool_ask.resolve(self.ws, reserved), reserved)
+                code, targets, _ = pool_route_handler.classify(
+                    self.ws, {"id": "task-1", "requested_worker": reserved})
+                self.assertEqual(code, expected_code)
+                self.assertEqual(targets, [reserved])
+                pinned = pr.bind_room(self.ws, "!review:ag2.space", reserved)
+                self.assertEqual(pinned["bindings"]["!review:ag2.space"], reserved)
+
+    def test_reserved_broker_display_names_are_rejected_without_mutation(self):
+        frozen = self.frozen()
+        for reserved in ("core", W1, W2, W3, W2.upper()):
+            with self.subTest(reserved=reserved):
+                with self.assertRaisesRegex(pr.RosterError, "reserved recipient name"):
+                    self.apply({W1: reserved}, 7)
+                self.assertEqual(self.frozen(), frozen)
+
+    def test_broker_display_cannot_shadow_an_existing_nonhex_worker_id(self):
+        pr.register_worker(self.ws, "worker-2", "legacy-worker")
+        frozen = self.frozen()
+        with self.assertRaisesRegex(pr.RosterError, "reserved recipient name"):
+            self.apply({W1: "worker-2"}, 7)
+        self.assertEqual(self.frozen(), frozen)
+        self.assertEqual(pr.resolve_label(pr.load_roster(self.ws), "worker-2"), "worker-2")
+
+    def test_registration_cannot_shadow_an_existing_workers_human_name(self):
+        self.apply({W1: "worker-2"}, 7)
+        frozen = self.frozen()
+        for taken in ("worker-2", "base-one"):
+            with self.subTest(taken=taken):
+                with mock.patch.object(pr, "publish_task_event_handler",
+                                       side_effect=AssertionError("handler was published")):
+                    with self.assertRaisesRegex(pr.RosterError, "conflicts with worker"):
+                        pr.register_worker(self.ws, taken, "new-worker")
+                self.assertEqual(self.frozen(), frozen)
 
     def test_removing_override_restores_base_label_and_replaying_is_byte_identical(self):
         self.apply({W1: "Ryan"}, 7)

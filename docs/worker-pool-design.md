@@ -47,12 +47,14 @@ cannot prove. Pending deliveries remain assigned to that worker.
 **A worker has an id, a base label, and an optional display override.** The id is
 the worker's identity, opaque, never changed or reused; every path, filename,
 roster key and header names it. The base `label` is a mutable routing alias,
-never in a path or glob. A unique base label, display label, or full ID resolves
-to the worker ID where intent is captured. A name shared by recipients is
-refused, even when it equals `core` or another worker ID. The optional
-`display_label` from AG2 Space also changes the name shown to people; removing
-it restores the base label. Human status renders the
-effective name with the full ID, such as
+never in a path or glob. An exact full ID or `core` selects that recipient;
+unique base and display labels resolve to a worker ID where intent is captured.
+A human name shared by workers is refused. New broker display names equal to
+`core`, any existing worker ID, or shaped like a full 32-hex ID are refused.
+Registration refuses a new ID already used as another worker's name. The
+optional `display_label` from AG2 Space also changes the name shown to people;
+removing it restores the base label. Human status renders the effective name
+with the full ID, such as
 `kc-reviewer-ryan (274cb60d473744dba54040a9de119877)`.
 
 | field | example | use |
@@ -472,8 +474,9 @@ label snapshot independently of the general `config_version`, and
 profile may start at a lower version. Unrelated roster compiles preserve both
 fields. Retired IDs are ignored. A snapshot with an unknown ID can update
 known workers, but it does not advance the label version, so a later poll can
-apply the missing worker after registration. Reapplying the current version
-repairs local label drift from the owner's map. The pool advertisement, session
+apply the missing worker after registration. A broker label edit can persist
+without advancing `config.version`, so reapplying the current version follows
+the owner's map and also repairs local label drift. The pool advertisement, session
 list, and human status use `display_label` when present. Routing accepts the
 display name when unique, while the roster key and base label remain unchanged.
 

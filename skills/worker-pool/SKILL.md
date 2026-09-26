@@ -53,11 +53,13 @@ room binding target. The roster's base `label` is a routing alias.
 `rename_worker` changes it without changing the ID.
 
 AG2 Space can set an optional `display_label` override for a worker. It appears
-in the picker, session list, pool advertisement, and human status. A unique
-base label, display label, or full ID can address the worker in `pool_ask --to`,
-room binding, and task requests. A name shared by recipients is refused,
-including when it equals `core` or another worker's ID. Human status uses
-`name (full worker_id)`, for example
+in the picker, session list, pool advertisement, and human status. An exact
+full ID or `core` always selects that recipient. A unique base or display label
+can address a worker in `pool_ask --to`, room binding, and task requests; a
+human name shared by workers is refused. New broker display labels equal to
+`core`, any existing worker ID, or shaped like a full 32-hex ID are refused.
+Registration refuses a new ID already used as another worker's name. Human
+status uses `name (full worker_id)`, for example
 `kc-reviewer-ryan (274cb60d473744dba54040a9de119877)`. The `pool_ask --who`
 JSON keeps `label` as the base routing alias and adds `display_label` as the
 effective name; text adds `alias=<base label>` when the names differ. Removing
@@ -70,8 +72,9 @@ full worker ID, under the roster lock. It tracks the broker snapshot in
 to a new profile accepts that profile's lower version. Retired IDs are
 ignored; a pending unknown ID prevents the label version from advancing so a
 later poll can apply it after registration. Other roster compiles preserve
-these fields. A repeat of the current version repairs any local label drift
-against the owner's complete map.
+these fields. A broker label edit can persist without a version bump, so a
+repeat of the current version follows the owner's complete map and repairs
+local label drift.
 
 ## Talking to the other instances (core ↔ worker)
 
