@@ -19,8 +19,10 @@ sys.path.insert(0, str(SCRIPTS))
 
 import pool_advertise as pa  # noqa: E402
 import pool_ask  # noqa: E402
+
 import pool_roster as pr  # noqa: E402
 import pool_sessions  # noqa: E402
+
 import pool_wedge_cards  # noqa: E402
 
 W1 = "02e4302f00844397bac09533fc398248"
