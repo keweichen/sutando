@@ -32,6 +32,11 @@ def load(path: Path, name: str):
 
 
 class WorkerLabelSync(unittest.TestCase):
+    def setUp(self):
+        env_patch = mock.patch.dict(os.environ)
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
     def test_standalone_profile_contract_runs_under_coverage(self):
         suite = load(PACKAGE_TEST, "worker_profile_contract")
         cases = (
