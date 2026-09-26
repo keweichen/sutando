@@ -61,7 +61,7 @@ def test_only_owner_overrides_are_applied_by_id():
 
         assert m._maybe_pull_worker_labels(_ready(m)) is True
         assert seen == [({WID: "kc-reviewer-ryan"}, 7, MXID)]
-        assert calls == [("GET", f"/v1/agents/%40worker-label-test%3Aag2.space/profile")]
+        assert calls == [("GET", "/v1/agents/%40worker-label-test%3Aag2.space/profile")]
         assert m._maybe_pull_worker_labels(_ready(m)) is False, "refresh is bounded"
 
 
