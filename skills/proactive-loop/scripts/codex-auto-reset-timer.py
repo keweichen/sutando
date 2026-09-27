@@ -66,10 +66,10 @@ def render(workspace: str | Path, codex_home: str | Path, *,
     codex = codex_bin or shutil.which("codex")
     if not codex:
         raise ValueError("codex executable was not found in PATH")
-    codex = Path(codex).expanduser().resolve()
+    codex = Path(codex).expanduser().absolute()
     if not codex.is_file() or not os.access(codex, os.X_OK):
         raise ValueError(f"codex executable is not runnable: {codex}")
-    interpreter = Path(python or sys.executable).expanduser().resolve()
+    interpreter = Path(python or sys.executable).expanduser().absolute()
     if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
         raise ValueError(f"python executable is not runnable: {interpreter}")
     path_parts = [str(codex.parent), *(part for part in os.get_exec_path()

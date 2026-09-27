@@ -77,6 +77,14 @@ without an active agent session and checks the account again before spending
 a credit. API-key-only accounts and accounts without earned reset credits are
 left alone.
 
+The Codex CLI must return `workspaceRouting.chatgptAccountId` from
+`account/read` so Sutando can tie redemption state to the authenticated
+account. This works with Codex CLI 0.157.0; 0.154.0 does not return that field.
+When it is missing, the timer reports `unsupported-codex-cli` and skips
+redemption without spending a credit. The timer keeps the stable Codex and
+Python executable paths, so CLI and package-manager updates can replace their
+symlink targets without waiting for another core or worker launch.
+
 The CLI currently reports `usedPercent` as a whole number. In practice the
 99.9% rule fires when it reports **100% used**; Sutando cannot detect exactly
 0.1% remaining until the API returns finer precision. A successful redemption

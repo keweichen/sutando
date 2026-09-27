@@ -148,6 +148,31 @@ class ResetPolicyTests(unittest.TestCase):
             reset.tick(missing, self.workspace, NOW)
         self.assertEqual(missing.consumes, [])
 
+    def test_unsupported_account_and_old_cli_skip_without_spending(self) -> None:
+        class MissingRouting(FakeServer):
+            def call(self, method: str, params: dict | None = None) -> dict:
+                result = super().call(method, params)
+                if method == "account/read":
+                    result.pop("workspaceRouting")
+                return result
+
+        old_cli = MissingRouting([limits()])
+        self.assertEqual(reset.tick(old_cli, self.workspace, NOW)["status"],
+                         "unsupported-codex-cli")
+        self.assertEqual(old_cli.consumes, [])
+
+        class ApiKeyAccount(FakeServer):
+            def call(self, method: str, params: dict | None = None) -> dict:
+                result = super().call(method, params)
+                if method == "account/read":
+                    result["account"]["type"] = "apiKey"
+                return result
+
+        api_key = ApiKeyAccount([limits()])
+        self.assertEqual(reset.tick(api_key, self.workspace, NOW)["status"],
+                         "unsupported-account")
+        self.assertEqual(api_key.consumes, [])
+
     def test_account_switch_with_null_usage_id_fails_closed(self) -> None:
         snapshot = limits()
         snapshot["accountId"] = None

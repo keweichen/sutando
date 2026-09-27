@@ -40,6 +40,14 @@ class NoCreditError(AutoResetError):
     """The account has no eligible earned reset to redeem."""
 
 
+class UnsupportedAccountError(AutoResetError):
+    """The authenticated Codex account does not have ChatGPT rate limits."""
+
+
+class AccountIdentityUnavailable(AutoResetError):
+    """The Codex CLI did not provide a safe ChatGPT account identity."""
+
+
 def _number(value: Any) -> bool:
     return (isinstance(value, (int, float)) and not isinstance(value, bool)
             and math.isfinite(value))
@@ -176,7 +184,7 @@ class AppServer:
 def _account_id(account_result: dict[str, Any], limits: dict[str, Any]) -> str:
     account = _json_object(account_result.get("account"), "Codex account")
     if account.get("type") != "chatgpt":
-        raise AutoResetError("Codex account is not ChatGPT")
+        raise UnsupportedAccountError("Codex account is not ChatGPT")
     route = account_result.get("workspaceRouting")
     routed_id = route.get("chatgptAccountId") if isinstance(route, dict) else None
     usage_id = limits.get("accountId")
@@ -185,7 +193,7 @@ def _account_id(account_result: dict[str, Any], limits: dict[str, Any]) -> str:
     if usage_id is not None and (not isinstance(usage_id, str) or not usage_id):
         raise AutoResetError("invalid usage account ID")
     if not routed_id:
-        raise AutoResetError("routed Codex account identity unavailable")
+        raise AccountIdentityUnavailable("routed Codex account identity unavailable")
     if usage_id and routed_id != usage_id:
         raise AutoResetError("Codex account identity changed")
     return routed_id
@@ -341,7 +349,12 @@ def tick(server: AppServer, workspace: Path, now: float | None = None) -> dict[s
         return {"status": "disabled"}
     account = server.call("account/read", {"refreshToken": False})
     first = _limits(server)
-    account_id = _account_id(account, first)
+    try:
+        account_id = _account_id(account, first)
+    except UnsupportedAccountError:
+        return {"status": "unsupported-account"}
+    except AccountIdentityUnavailable:
+        return {"status": "unsupported-codex-cli"}
     path = _state_path(workspace, account_id)
     with _locked_state(path):
         account = server.call("account/read", {"refreshToken": False})

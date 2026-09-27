@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import plistlib
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -74,7 +75,7 @@ class TimerTest(unittest.TestCase):
         with open(t.plist_path(home or self.home, self.agents), "rb") as stream:
             return plistlib.load(stream)
 
-    def test_job_runs_one_tick_per_five_minutes_with_resolved_paths(self):
+    def test_job_runs_one_tick_per_five_minutes_with_stable_executables(self):
         with mock.patch.dict(os.environ, {"SUTANDO_CODEX_AUTO_RESET_ENABLED": "0"}):
             result = self.ensure()
         job = self.read_job()
@@ -86,7 +87,7 @@ class TimerTest(unittest.TestCase):
             str(REPO / "skills/proactive-loop/scripts/codex-auto-reset.py"),
             "--workspace", str(self.workspace.resolve()),
             "--codex-home", str(self.home.resolve()),
-            "--codex-bin", str(self.codex.resolve()), "--json"])
+            "--codex-bin", str(self.codex.absolute()), "--json"])
         self.assertTrue(Path(job["ProgramArguments"][0]).is_absolute())
         self.assertTrue((self.workspace / "logs").is_dir())
         self.assertEqual(job["StandardOutPath"],
@@ -94,7 +95,7 @@ class TimerTest(unittest.TestCase):
         self.assertEqual(job["EnvironmentVariables"]["CODEX_HOME"], str(self.home.resolve()))
         self.assertEqual(job["EnvironmentVariables"]["SUTANDO_CODEX_AUTO_RESET_ENABLED"], "0")
         self.assertEqual(job["EnvironmentVariables"]["PATH"].split(os.pathsep)[0],
-                         str(self.codex.parent.resolve()))
+                         str(self.codex.parent.absolute()))
 
     def test_ensure_does_not_rebootstrap_unchanged_loaded_job(self):
         first = self.ensure(enabled_override="1")
@@ -114,13 +115,25 @@ class TimerTest(unittest.TestCase):
         self.assertEqual(self.read_job()["EnvironmentVariables"][
             "SUTANDO_CODEX_AUTO_RESET_ENABLED"], "1")
 
-    def test_symlinked_codex_is_passed_as_an_absolute_executable(self):
+    def test_symlinked_binaries_remain_upgradeable(self):
         link = self.root / "bin/codex"
         link.parent.mkdir()
         link.symlink_to(self.codex)
-        job = t.render(self.workspace, self.home, codex_bin=link)
+        python_link = self.root / "bin/python"
+        python_link.symlink_to(sys.executable)
+        job = t.render(self.workspace, self.home, codex_bin=link,
+                       python=python_link)
         self.assertEqual(job["ProgramArguments"][-3:-1],
-                         ["--codex-bin", str(self.codex.resolve())])
+                         ["--codex-bin", str(link.absolute())])
+        self.assertEqual(job["ProgramArguments"][0], str(python_link.absolute()))
+        newer = self.root / "codex-new"
+        newer.write_text("#!/bin/sh\nexit 0\n")
+        newer.chmod(0o700)
+        link.unlink()
+        link.symlink_to(newer)
+        self.assertEqual(t.render(self.workspace, self.home, codex_bin=link,
+                                  python=python_link)["ProgramArguments"],
+                         job["ProgramArguments"])
 
     def test_same_home_has_one_job_across_workspaces(self):
         other = self.root / "other-workspace"
