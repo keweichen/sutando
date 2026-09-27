@@ -36,6 +36,10 @@ class AutoResetError(Exception):
     pass
 
 
+class NoCreditError(AutoResetError):
+    """The account has no eligible earned reset to redeem."""
+
+
 def _number(value: Any) -> bool:
     return (isinstance(value, (int, float)) and not isinstance(value, bool)
             and math.isfinite(value))
@@ -222,7 +226,7 @@ def _credit_id(limits: dict[str, Any], now: float) -> str | None:
     if not _integer(count) or count < 0:
         raise AutoResetError("invalid reset credit count")
     if count == 0:
-        raise AutoResetError("no reset credit available")
+        raise NoCreditError("no reset credit available")
     rows = summary.get("credits")
     if rows is None:
         return None
@@ -239,7 +243,7 @@ def _credit_id(limits: dict[str, Any], now: float) -> str | None:
             continue
         eligible.append((float(expiry) if expiry is not None else float("inf"), row["id"]))
     if not eligible:
-        raise AutoResetError("no eligible Codex reset credit detail")
+        raise NoCreditError("no eligible Codex reset credit detail")
     return min(eligible)[1]
 
 
@@ -374,10 +378,8 @@ def tick(server: AppServer, workspace: Path, now: float | None = None) -> dict[s
         if pending is None:
             try:
                 credit_id = _credit_id(limits, observed_at)
-            except AutoResetError as exc:
-                if str(exc).startswith("no "):
-                    return {"status": "no-credit"}
-                raise
+            except NoCreditError:
+                return {"status": "no-credit"}
             pending = {"key": str(uuid.uuid4()), "window": window_key,
                        "creditId": credit_id}
             state["pending"] = pending
