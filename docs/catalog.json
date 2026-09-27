@@ -105,8 +105,8 @@
     "operators"
    ],
    "status": "active",
-   "canonical_for": "Codex core setup and rollback",
-   "last_verified": "2026-08-04"
+   "canonical_for": "Codex core setup, earned-reset policy, and rollback",
+   "last_verified": "2026-09-27"
   },
   "docs/community-use-cases/README.md": {
    "title": "Community use cases",

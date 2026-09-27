@@ -63,6 +63,9 @@ fi
 if [ "${SUTANDO_SELF_DEVELOPMENT_ENABLED+x}" = x ]; then
   ENV_ARGS+=(-e "SUTANDO_SELF_DEVELOPMENT_ENABLED=$SUTANDO_SELF_DEVELOPMENT_ENABLED")
 fi
+if [ "${SUTANDO_CODEX_AUTO_RESET_ENABLED+x}" = x ]; then
+  ENV_ARGS+=(-e "SUTANDO_CODEX_AUTO_RESET_ENABLED=$SUTANDO_CODEX_AUTO_RESET_ENABLED")
+fi
 
 if [ "${1:-}" = "--print-env" ]; then
   printf '%s\n' "${ENV_ARGS[@]}"
@@ -99,6 +102,14 @@ done
 if ! tmux -S "$SOCKET" has-session -t "=$SESSION" 2>/dev/null; then
   echo "launch-codex-worker-session: $SESSION exited during startup" >&2
   exit 1
+fi
+
+if [ "$(uname -s)" = "Darwin" ]; then
+  reset_timer="$REPO/skills/proactive-loop/scripts/codex-auto-reset-timer.py"
+  if [ -f "$reset_timer" ] && ! "$WORKER_PY" "$reset_timer" ensure \
+      --workspace "$SUTANDO_WORKSPACE_DIR" --codex-home "${CODEX_HOME:-$HOME/.codex}" >/dev/null; then
+    echo "launch-codex-worker-session: could not reconcile the Codex earned-reset timer" >&2
+  fi
 fi
 
 # The supervisor owns this worker's standby watcher and task notifier.

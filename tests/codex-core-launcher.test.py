@@ -345,6 +345,28 @@ exit 0
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("SUTANDO_TASK_EVENT_HANDLER=", self.log.read_text())
 
+    def test_launch_reconciles_codex_auto_reset_for_configured_home(self):
+        timer = self.root / "skills/proactive-loop/scripts/codex-auto-reset-timer.py"
+        timer.parent.mkdir(parents=True, exist_ok=True)
+        timer.write_text(
+            "import json, os, pathlib, sys\n"
+            "pathlib.Path(os.environ['RESET_TIMER_LOG']).write_text(json.dumps({"
+            "'args': sys.argv[1:], 'enabled': os.environ.get('SUTANDO_CODEX_AUTO_RESET_ENABLED')}))\n"
+        )
+        self._write_exe("python3", "#!/bin/sh\nexit 71\n")
+        (self.root / ".env").write_text("SUTANDO_CODEX_AUTO_RESET_ENABLED=1\n")
+        log = Path(self.tmp.name) / "reset-timer.json"
+        result = self.run_launcher(env_extra={"RESET_TIMER_LOG": str(log),
+                                              "SUTANDO_PY": sys.executable,
+                                              "SUTANDO_CODEX_AUTO_RESET_ENABLED": "0"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(log.read_text())["args"], [
+            "ensure", "--workspace", str((self.root / "workspace").resolve()),
+            "--codex-home", str(self.root / "codex-home"),
+        ])
+        self.assertEqual(json.loads(log.read_text())["enabled"], "0")
+        self.assertIn("-e SUTANDO_CODEX_AUTO_RESET_ENABLED=0", self.log.read_text())
+
     def test_launches_codex_and_managed_task_notifier(self):
         result = self.run_launcher(env_extra={
             "SUTANDO_CORE_MODEL": "gpt-test",
